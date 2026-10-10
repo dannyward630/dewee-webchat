@@ -153,7 +153,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .md hr { border: 0; border-top: 1px solid var(--dw-border); margin: 14px 0; }
 .md .table { overflow-x: auto; border: 1px solid var(--dw-border); border-radius: 10px; }
 .md table { border-collapse: collapse; width: 100%; font-size: 13px; }
-.md th, .md td { padding: 7px 10px; border-bottom: 1px solid var(--dw-border); text-align: left; vertical-align: top; }
+.md th, .md td { padding: 7px 10px; border-bottom: 1px solid var(--dw-border); text-align: left; vertical-align: top; overflow-wrap: break-word; min-width: 4.5em; }
 .md th { background: var(--dw-surface); font-weight: 600; }
 .md tr:last-child td { border-bottom: 0; }
 .cursor::after { content: ""; display: inline-block; width: 7px; height: 15px; margin-left: 2px; vertical-align: -2px; background: var(--dw-accent); border-radius: 2px; animation: blink 1s steps(2) infinite; }
