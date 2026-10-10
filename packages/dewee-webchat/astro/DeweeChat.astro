@@ -1,0 +1,19 @@
+---
+// Astro component: <DeweeChat endpoint="/api/dewee" title="Support" showReasoning={false} />
+import type { DeweeChatConfig } from "dewee-webchat";
+
+type Props = Partial<DeweeChatConfig> & { class?: string };
+const { class: className, ...config } = Astro.props;
+const attrs: Record<string, string> = {};
+for (const [key, value] of Object.entries(config)) {
+  if (value === undefined || value === null) continue;
+  const name = key.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+  attrs[name] = Array.isArray(value) ? JSON.stringify(value) : String(value);
+}
+---
+
+<dewee-chat class={className} {...attrs}></dewee-chat>
+
+<script>
+  import "dewee-webchat";
+</script>

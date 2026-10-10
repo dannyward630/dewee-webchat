@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dewee-webchat · Express</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 680px; margin: 64px auto; padding: 0 16px; color: #1b1f4b; }
+      code { background: #f1f0fb; padding: 2px 6px; border-radius: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Express + dewee-webchat</h1>
+    <p>The chat bubble in the corner talks to <code>/api/dewee</code>, served by <code>server.js</code>.</p>
+
+    <script
+      src="/dewee-webchat.js"
+      data-endpoint="/api/dewee"
+      data-title="Dewee assistant"
+      data-suggestions="What is Dewee?|How do I add this chat to my site?"
+      defer
+    ></script>
+  </body>
+</html>

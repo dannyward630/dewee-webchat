@@ -1,0 +1,12 @@
+{
+  "name": "example-node-express",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js"
+  },
+  "dependencies": {
+    "dewee-webchat": "workspace:*",
+    "express": "^5.1.0"
+  }
+}

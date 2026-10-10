@@ -1,0 +1,19 @@
+{
+  "name": "dewee-webchat-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.18.0",
+  "scripts": {
+    "build": "pnpm --filter dewee-webchat build",
+    "test": "pnpm --filter dewee-webchat test",
+    "typecheck": "pnpm --filter dewee-webchat typecheck"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd",
+      "sharp",
+      "@parcel/watcher"
+    ]
+  }
+}

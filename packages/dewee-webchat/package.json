@@ -1,0 +1,98 @@
+{
+  "name": "dewee-webchat",
+  "version": "0.1.0",
+  "description": "Embeddable chat widget for Dewee AI agents — web component, React/Vue/Astro wrappers and a secure backend handler (Workers, Next.js, Node, Bun, Deno).",
+  "license": "MIT",
+  "type": "module",
+  "author": "NextLevelBuilder <hi@nextlevelbuilder.io>",
+  "homepage": "https://webchat.dewee.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nextlevelbuilder/dewee-webchat.git",
+    "directory": "packages/dewee-webchat"
+  },
+  "bugs": "https://github.com/nextlevelbuilder/dewee-webchat/issues",
+  "keywords": [
+    "dewee",
+    "goclaw",
+    "ai",
+    "agent",
+    "chatbot",
+    "chat-widget",
+    "web-component",
+    "react",
+    "vue",
+    "astro",
+    "nextjs",
+    "cloudflare-workers"
+  ],
+  "sideEffects": [
+    "./dist/index.js",
+    "./dist/dewee-webchat.js"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "unpkg": "./dist/dewee-webchat.js",
+  "jsdelivr": "./dist/dewee-webchat.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./vue": {
+      "types": "./dist/vue.d.ts",
+      "import": "./dist/vue.js"
+    },
+    "./astro": "./astro/DeweeChat.astro",
+    "./cdn": "./dist/dewee-webchat.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "astro",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "vue": ">=3.3"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/ws": "^8.18.2",
+    "happy-dom": "^18.0.1",
+    "react": "^19.1.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "vue": "^3.5.18",
+    "ws": "^8.22.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
