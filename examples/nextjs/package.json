@@ -2,6 +2,16 @@
   "name": "example-nextjs",
   "private": true,
   "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "build:worker": "opennextjs-cloudflare build && node scripts/strip-open-next-env.mjs && node scripts/patch-open-next-preview-props.mjs",
+    "preview": "pnpm build:worker && opennextjs-cloudflare preview",
+    "deploy": "pnpm build:worker && opennextjs-cloudflare deploy",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "dewee-webchat": "workspace:*",
     "next": "^16.4.0",

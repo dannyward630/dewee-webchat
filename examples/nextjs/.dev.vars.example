@@ -1,0 +1,3 @@
+# Secrets for `pnpm dev` and `pnpm preview` (copy to .dev.vars). Public vars come from wrangler.jsonc.
+DEWEE_GATEWAY_TOKEN=
+DEWEE_WEBCHAT_SECRET=
