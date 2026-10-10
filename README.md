@@ -64,8 +64,11 @@ pnpm build       # packages/dewee-webchat/dist
 Run the playground locally: copy `examples/cloudflare/.dev.vars.example` to `.dev.vars`, fill it in, then
 `pnpm -C examples/cloudflare dev`.
 
-Release: bump `packages/dewee-webchat/package.json`, `npm publish` from that folder, then
-`node cdn/scripts/build-cdn.mjs && pnpm -C examples/cloudflare exec wrangler deploy --config ../../cdn/wrangler.jsonc` to add the version to the CDN.
+Release: bump `packages/dewee-webchat/package.json` (and `VERSION` in `php/dewee-webchat.php`), commit, then
+push a matching tag (`git tag v0.1.2 && git push origin v0.1.2`). [`release.yml`](.github/workflows/release.yml)
+publishes to npm through npm Trusted Publishing (OIDC, no token) and creates the GitHub release. Then run
+`node cdn/scripts/build-cdn.mjs && pnpm -C examples/cloudflare exec wrangler deploy --config ../../cdn/wrangler.jsonc`
+to add the version to the CDN.
 
 ## License
 

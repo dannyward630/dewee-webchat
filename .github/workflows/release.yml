@@ -1,0 +1,60 @@
+name: Release
+
+# Push a tag that matches packages/dewee-webchat/package.json (e.g. v0.1.2) to publish to npm
+# through npm Trusted Publishing (OIDC, no NPM_TOKEN) and create the GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # npm Trusted Publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      # Trusted Publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@11
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check tag matches package version
+        id: version
+        run: |
+          version=$(node -p "require('./packages/dewee-webchat/package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $version"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if npm view "dewee-webchat@$version" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - run: pnpm -C packages/dewee-webchat typecheck
+      - run: pnpm -C packages/dewee-webchat test
+      - run: pnpm -C packages/dewee-webchat build
+
+      - name: Publish to npm
+        if: steps.version.outputs.published == 'false'
+        working-directory: packages/dewee-webchat
+        run: npm publish --access public --provenance
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" php/dewee-webchat.php --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" php/dewee-webchat.php --title "$GITHUB_REF_NAME" --generate-notes
+          fi
