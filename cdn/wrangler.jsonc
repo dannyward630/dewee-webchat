@@ -1,0 +1,10 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "dewee-webchat-cdn",
+  "account_id": "7ac87c90789159ae1b10b7d78f5dcc08",
+  "compatibility_date": "2026-10-01",
+  "main": "./src/cdn-worker.js",
+  "assets": { "directory": "./public", "binding": "ASSETS", "not_found_handling": "404-page", "run_worker_first": ["/dewee-webchat*"] },
+  "routes": [{ "pattern": "webchat-cdn.dewee.sh", "custom_domain": true }],
+  "workers_dev": false
+}

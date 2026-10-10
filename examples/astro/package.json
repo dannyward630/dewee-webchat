@@ -1,0 +1,14 @@
+{
+  "name": "example-astro",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.3.4",
+    "astro": "^7.3.8",
+    "dewee-webchat": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.149.0"
+  }
+}

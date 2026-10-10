@@ -91,9 +91,11 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       if (!url || !token) return { creds: null, byo: true, error: "Both gateway URL and token are required" };
       let u: URL;
       try { u = new URL(url); } catch { return { creds: null, byo: true, error: "Invalid gateway URL" }; }
-      const local = u.hostname === "localhost" || u.hostname === "127.0.0.1";
-      if (u.protocol !== "https:" && !(local && u.protocol === "http:")) return { creds: null, byo: true, error: "Gateway URL must use https" };
-      if (byo.allowedHosts?.length && !byo.allowedHosts.includes(u.hostname)) return { creds: null, byo: true, error: "Gateway host not allowed" };
+      // The server connects wherever the client points it, so internal hosts need an explicit allowlist entry.
+      const listed = !!byo.allowedHosts?.includes(u.hostname);
+      if (byo.allowedHosts?.length && !listed) return { creds: null, byo: true, error: "Gateway host not allowed" };
+      if (isInternalHost(u.hostname) && !listed) return { creds: null, byo: true, error: "Gateway host not allowed" };
+      if (u.protocol !== "https:" && !(listed && u.protocol === "http:")) return { creds: null, byo: true, error: "Gateway URL must use https" };
       return { creds: { url: u.origin + u.pathname.replace(/\/$/, ""), token }, byo: true };
     }
     return { creds: serverCreds(), byo: false };
@@ -308,4 +310,16 @@ export function optionsFromEnv(env: Record<string, string | undefined>, override
     // undefined overrides must not erase env-derived values
     ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)),
   };
+}
+
+/** Loopback, private, link-local and metadata addresses (plus bare/internal names). */
+function isInternalHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".internal") || h.endsWith(".local") || !h.includes(".") && !h.includes(":")) return true;
+  const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  return h.includes(":") && (h === "::1" || h === "::" || h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80") || h.startsWith("::ffff:"));
 }

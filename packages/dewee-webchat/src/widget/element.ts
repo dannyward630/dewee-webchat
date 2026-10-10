@@ -92,7 +92,10 @@ function loadTurnstile(): Promise<void> {
   }));
 }
 
-export class DeweeChatElement extends HTMLElement {
+// SSR-safe base: importing the package on a server (Next.js, Astro, Nuxt) must not touch the DOM.
+const ElementBase = (typeof HTMLElement === "undefined" ? class {} : HTMLElement) as typeof HTMLElement;
+
+export class DeweeChatElement extends ElementBase {
   static get observedAttributes() { return ATTRS; }
 
   private root: ShadowRoot;
