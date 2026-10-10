@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `vite dev` (never commit .dev.vars).
+# Production: `wrangler secret put DEWEE_GATEWAY_TOKEN` and `wrangler secret put DEWEE_WEBCHAT_SECRET`.
+DEWEE_GATEWAY_TOKEN=your-gateway-token-or-operator-api-key
+# >= 32 random chars, e.g. node -e "console.log(crypto.randomBytes(32).toString('base64url'))"
+DEWEE_WEBCHAT_SECRET=change-me-to-a-long-random-string

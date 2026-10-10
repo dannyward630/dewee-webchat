@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "dewee-webchat-vue",
+  "account_id": "7ac87c90789159ae1b10b7d78f5dcc08",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  // The Vite plugin fills in assets.directory with the client build output.
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "routes": [{ "pattern": "webchat-vue.dewee.sh", "custom_domain": true }],
+  "workers_dev": false,
+  // Public settings. Secrets (DEWEE_GATEWAY_TOKEN, DEWEE_WEBCHAT_SECRET) go in .dev.vars locally
+  // and `wrangler secret put` in production.
+  "vars": {
+    "DEWEE_GATEWAY_URL": "https://dewee.zuey.me",
+    "DEWEE_AGENTS": "dewee-web-advisor,zuey-ai",
+    "DEWEE_DEFAULT_AGENT": "dewee-web-advisor"
+  }
+}
