@@ -9,7 +9,7 @@ import {
   type ChatStreamEvent,
   type PublicConfig,
 } from "../protocol";
-import { buildSessionKey, fetchHistory, listAgents, streamChat, type GatewayCredentials } from "./gateway-client";
+import { buildSessionKey, fetchHistory, listAgents, streamChat, type GatewayCredentials, type GatewayError } from "./gateway-client";
 import {
   memoryRateLimiter,
   randomId,
@@ -271,6 +271,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       const messages = await fetchHistory(creds, o.userIdPrefix + visitorId, agent, buildSessionKey(agent, `webchat-${visitorId}-${conversationId}`));
       return json(req, { messages });
     } catch (e) {
+      // A conversation that has not sent its first message yet does not exist on the gateway.
+      if ((e as GatewayError).code === "NOT_FOUND") return json(req, { messages: [] });
       return fail(req, 502, (e as Error).message, "gateway_error");
     }
   }

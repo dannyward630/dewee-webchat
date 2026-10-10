@@ -15,5 +15,7 @@ for (const [key, value] of Object.entries(config)) {
 <dewee-chat class={className} {...attrs}></dewee-chat>
 
 <script>
-  import "dewee-webchat";
+  // Explicit call: bundlers may tree-shake a bare side-effect import.
+  import { defineDeweeChat } from "dewee-webchat";
+  defineDeweeChat();
 </script>

@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dewee-webchat",
+  "account_id": "7ac87c90789159ae1b10b7d78f5dcc08",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "routes": [{ "pattern": "webchat.dewee.sh", "custom_domain": true }],
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "ratelimits": [
+    { "name": "CHAT_LIMITER", "namespace_id": "4201", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SESSION_LIMITER", "namespace_id": "4202", "simple": { "limit": 10, "period": 60 } }
+  ],
+  "vars": {
+    "DEWEE_GATEWAY_URL": "https://dewee.zuey.me",
+    "DEWEE_AGENTS": "dewee-web-advisor,zuey-ai",
+    "DEWEE_DEFAULT_AGENT": "dewee-web-advisor",
+    // Playground only: visitors may try their own gateway; the Worker forwards but never stores it.
+    "DEWEE_ALLOW_CLIENT_CREDENTIALS": "true"
+  }
+  // Secrets: wrangler secret put DEWEE_GATEWAY_TOKEN / DEWEE_WEBCHAT_SECRET
+}

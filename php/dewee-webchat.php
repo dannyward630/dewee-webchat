@@ -398,6 +398,11 @@ final class DeweeWebchat
                 self::buildSessionKey($agent, "webchat-{$visitorId}-{$conversationId}"),
             );
         } catch (Throwable $e) {
+            // A conversation that has not sent its first message yet does not exist on the gateway.
+            if ($e instanceof DeweeGatewayError && $e->gatewayCode === 'NOT_FOUND') {
+                $this->json(['messages' => []]);
+                return;
+            }
             $this->fail(502, $e->getMessage(), 'gateway_error');
             return;
         }
@@ -805,7 +810,6 @@ final class DeweeWebchat
             'Content-Type' => 'text/event-stream; charset=utf-8',
             'Cache-Control' => 'no-cache, no-transform',
             'X-Accel-Buffering' => 'no',
-            'Content-Encoding' => 'none',
         ] + $this->corsHeaders());
         @flush();
     }

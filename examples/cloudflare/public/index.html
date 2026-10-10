@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dewee-webchat — put your Dewee agent on any website</title>
+    <meta name="description" content="Open-source chat widget for Dewee AI agents. Streaming reasoning and tool calls, a secure backend for every stack, one script tag to start." />
+    <meta property="og:title" content="dewee-webchat" />
+    <meta property="og:description" content="Put your Dewee agent on any website: web component, React, Vue, Astro, Next.js, PHP." />
+    <meta property="og:image" content="https://webchat.dewee.sh/brand/dewee-icon-192.png" />
+    <link rel="icon" href="/brand/favicon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/dewee-webchat.js" defer></script>
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <header class="nav">
+      <div class="wrap nav-row">
+        <a class="logo" href="/" aria-label="dewee webchat home">
+          <img src="/brand/dewee-icon-192.png" alt="" width="30" height="30" />
+          <span>dewee <em>webchat</em></span>
+        </a>
+        <nav class="links" aria-label="Main">
+          <a href="#playground">Playground</a>
+          <a href="#install">Install</a>
+          <a href="#frameworks">Frameworks</a>
+          <a href="#security">Security</a>
+          <a class="gh" href="https://github.com/nextlevelbuilder/dewee-webchat" rel="noopener">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div>
+            <p class="eyebrow">Open source · MIT · <span id="version">v0.1</span></p>
+            <h1>Your Dewee agent, <span class="ink-accent">on any website.</span></h1>
+            <p class="lead">
+              A chat widget that streams the agent's reasoning and tool calls, plus a tiny backend that keeps
+              your gateway token off the browser. One script tag, or a component for React, Vue, Astro and Next.js.
+            </p>
+            <div class="cta">
+              <a class="btn primary" href="#playground">Try the playground</a>
+              <button class="btn copy" type="button" data-copy="npm i dewee-webchat"><code>npm i dewee-webchat</code><span>Copy</span></button>
+            </div>
+            <ul class="facts">
+              <li><strong>~40 KB</strong> no dependencies</li>
+              <li><strong>Live</strong> reasoning + tools</li>
+              <li><strong>7</strong> stacks, same contract</li>
+            </ul>
+          </div>
+          <div class="hero-demo" aria-hidden="true">
+            <div class="bubble u">Can you read our pricing page and summarise it?</div>
+            <div class="trace"><span class="dot spin"></span>Thinking…</div>
+            <div class="trace"><span class="tool">⌁</span><code>read url</code><em>done</em></div>
+            <div class="bubble a">Three plans: <b>Self-install</b> free, <b>AaaS</b> $500/yr, <b>Dedicated</b> on TOSE…</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="playground" class="band">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>Playground</h2>
+            <p>Every switch below is a real widget option. Change it, chat with a live agent, then copy the code.</p>
+          </div>
+
+          <div class="play">
+            <form class="controls" id="controls" autocomplete="off">
+              <fieldset>
+                <legend>Agent</legend>
+                <label>Agent
+                  <select name="agent" id="agent-select"><option value="">Loading…</option></select>
+                </label>
+                <label class="switch"><input type="checkbox" name="allowAgentSwitch" checked /><span>Let visitors switch agents</span></label>
+              </fieldset>
+
+              <fieldset>
+                <legend>Show</legend>
+                <label class="switch"><input type="checkbox" name="showReasoning" checked /><span>Reasoning stream</span></label>
+                <label class="switch"><input type="checkbox" name="showToolCalls" checked /><span>Tool calls &amp; results</span></label>
+                <label class="switch"><input type="checkbox" name="persist" checked /><span>Remember conversation</span></label>
+                <label class="switch"><input type="checkbox" name="hideBranding" /><span>Hide “Powered by dewee”</span></label>
+              </fieldset>
+
+              <fieldset>
+                <legend>Look</legend>
+                <label>Title <input name="title" value="Dewee assistant" maxlength="60" /></label>
+                <label>Subtitle <input name="subtitle" placeholder="(agent name)" maxlength="60" /></label>
+                <label>Greeting <input name="greeting" value="Hi there 👋" maxlength="60" /></label>
+                <label>Suggestions <span class="hint">one per line</span>
+                  <textarea name="suggestions" rows="3">What is Dewee?
+How do I add this chat to my site?</textarea>
+                </label>
+                <div class="row">
+                  <label>Theme
+                    <select name="theme"><option value="light">Light</option><option value="dark">Dark</option><option value="auto">Auto</option></select>
+                  </label>
+                  <label>Language
+                    <select name="locale"><option value="">Auto</option><option value="en">English</option><option value="vi">Tiếng Việt</option></select>
+                  </label>
+                </div>
+                <div class="row">
+                  <label>Accent
+                    <span class="accent"><input type="color" name="accentColor" value="#5446e8" /><span class="swatches" id="swatches"></span></span>
+                  </label>
+                  <label>Position
+                    <select name="position"><option value="bottom-right">Bottom right</option><option value="bottom-left">Bottom left</option></select>
+                  </label>
+                </div>
+                <label class="switch"><input type="checkbox" name="floating" /><span>Also show as a floating bubble on this page</span></label>
+              </fieldset>
+
+              <details class="byo">
+                <summary>Use your own gateway</summary>
+                <p class="hint">
+                  Point the widget at your own Dewee gateway. The URL and key travel with each request through this
+                  demo's Worker and are never stored. Use a scoped operator API key, not an admin token.
+                </p>
+                <label>Gateway URL <input name="gatewayUrl" placeholder="https://your-gateway.example.com" inputmode="url" /></label>
+                <label>API key <input name="gatewayToken" type="password" placeholder="goclaw_…" /></label>
+                <div class="row byo-actions">
+                  <button class="btn small" type="button" id="byo-apply">Connect</button>
+                  <button class="btn small ghost" type="button" id="byo-clear">Use demo gateway</button>
+                </div>
+                <p class="status" id="byo-status" role="status"></p>
+              </details>
+            </form>
+
+            <div class="preview">
+              <div class="browser">
+                <div class="bar"><i></i><i></i><i></i><span>your-site.com</span></div>
+                <div class="stage" id="stage">
+                  <dewee-chat id="preview" mode="inline" endpoint="/api/dewee"></dewee-chat>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="code" id="install">
+            <div class="tabs" role="tablist" id="code-tabs"></div>
+            <div class="code-body">
+              <button class="btn small copy-code" type="button" id="copy-code">Copy</button>
+              <pre><code id="code-out"></code></pre>
+            </div>
+            <p class="code-note" id="code-note"></p>
+          </div>
+        </div>
+      </section>
+
+      <section id="frameworks">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>Pick your stack</h2>
+            <p>Same widget, same backend contract. Each one is a working app you can open and copy.</p>
+          </div>
+          <div class="cards">
+            <a class="card" href="https://github.com/nextlevelbuilder/dewee-webchat/tree/main/examples/cloudflare"><b>HTML + Workers</b><span>This site. One script tag, one Worker route.</span><em>webchat.dewee.sh</em></a>
+            <a class="card" href="https://webchat-next.dewee.sh"><b>Next.js</b><span>App Router route handler + React component, on OpenNext.</span><em>webchat-next.dewee.sh</em></a>
+            <a class="card" href="https://webchat-astro.dewee.sh"><b>Astro</b><span>API route + &lt;DeweeChat /&gt; Astro component.</span><em>webchat-astro.dewee.sh</em></a>
+            <a class="card" href="https://webchat-react.dewee.sh"><b>React (Vite)</b><span>Props drive the widget live; ref API to open and send.</span><em>webchat-react.dewee.sh</em></a>
+            <a class="card" href="https://webchat-vue.dewee.sh"><b>Vue (Vite)</b><span>Reactive props, emitted events, exposed methods.</span><em>webchat-vue.dewee.sh</em></a>
+            <a class="card" href="https://github.com/nextlevelbuilder/dewee-webchat/tree/main/php"><b>PHP</b><span>One file, no Composer. Works on shared hosting.</span><em>php/dewee-webchat.php</em></a>
+            <a class="card" href="https://github.com/nextlevelbuilder/dewee-webchat/tree/main/examples/node-express"><b>Node / Express</b><span>toNodeHandler() for Express, Fastify or node:http.</span><em>examples/node-express</em></a>
+          </div>
+        </div>
+      </section>
+
+      <section id="security" class="band">
+        <div class="wrap">
+          <div class="section-head">
+            <h2>Why there is a backend</h2>
+            <p>Your gateway token can run any agent and read any session. It must never reach a browser.</p>
+          </div>
+          <div class="flow" role="img" aria-label="Browser widget talks to your backend over HTTPS and SSE; only the backend holds the token and talks to the Dewee gateway over WebSocket.">
+            <div class="node"><b>Visitor's browser</b><span>&lt;dewee-chat&gt; widget</span><small>signed visitor token only</small></div>
+            <div class="arrow"><span>HTTPS + SSE</span></div>
+            <div class="node strong"><b>Your backend</b><span>/api/dewee/*</span><small>holds the gateway token</small></div>
+            <div class="arrow"><span>WebSocket</span></div>
+            <div class="node"><b>Dewee gateway</b><span>agents · MCP · tools</span><small>streams thinking + tool events</small></div>
+          </div>
+          <ul class="checks">
+            <li><b>Token stays server-side.</b> The browser gets an HMAC-signed visitor id, nothing else.</li>
+            <li><b>Visitors are isolated.</b> Each one gets its own gateway user and session keys; history is scoped to them.</li>
+            <li><b>Agent allowlist.</b> Only the agents you list can be reached, whatever the client asks for.</li>
+            <li><b>Abuse limits.</b> Origin allowlist, per-visitor rate limits, message length cap, optional Turnstile.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <div class="wrap foot-row">
+        <span>Built by <a href="https://nextlevelbuilder.io">NextLevelBuilder</a> for <a href="https://dewee.sh">dewee</a>.</span>
+        <span>
+          <a href="https://github.com/nextlevelbuilder/dewee-webchat">GitHub</a> ·
+          <a href="https://www.npmjs.com/package/dewee-webchat">npm</a> ·
+          <a href="https://webchat-cdn.dewee.sh">CDN</a>
+        </span>
+      </div>
+    </footer>
+
+    <dewee-chat id="floating" endpoint="/api/dewee" hidden></dewee-chat>
+  </body>
+</html>

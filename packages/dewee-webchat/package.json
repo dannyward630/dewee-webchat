@@ -28,7 +28,8 @@
   ],
   "sideEffects": [
     "./dist/index.js",
-    "./dist/dewee-webchat.js"
+    "./dist/dewee-webchat.js",
+    "./dist/chunk-*.js"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.js",

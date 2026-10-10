@@ -9,5 +9,12 @@
     "@cloudflare/workers-types": "^5.20261010.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.149.0"
+  },
+  "scripts": {
+    "prebuild": "node scripts/copy-widget.mjs",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "dev": "node scripts/copy-widget.mjs && wrangler dev --port 8788",
+    "deploy": "node scripts/copy-widget.mjs && wrangler deploy",
+    "typecheck": "tsc --noEmit"
   }
 }
