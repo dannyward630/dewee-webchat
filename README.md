@@ -5,7 +5,7 @@ agent, with streamed reasoning, tool calls, markdown, history and agent switchin
 stays on your server.
 
 **▶ Playground:** [webchat.dewee.sh](https://webchat.dewee.sh) · **npm:** [`dewee-webchat`](https://www.npmjs.com/package/dewee-webchat) ·
-**CDN:** `https://webchat-cdn.dewee.sh/dewee-webchat@0.1.0/dewee-webchat.js`
+**CDN:** `https://webchat-cdn.dewee.sh/dewee-webchat@0.1.1/dewee-webchat.js`
 
 ```
 browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ──WebSocket──▶  Dewee gateway
@@ -23,7 +23,7 @@ npm i dewee-webchat
 3. Add the widget:
 
 ```html
-<script src="https://webchat-cdn.dewee.sh/dewee-webchat@0.1.0/dewee-webchat.js" data-endpoint="/api/dewee" defer></script>
+<script src="https://webchat-cdn.dewee.sh/dewee-webchat@0.1.1/dewee-webchat.js" data-endpoint="/api/dewee" defer></script>
 ```
 
 Full options, framework snippets and the security model: [packages/dewee-webchat/README.md](packages/dewee-webchat/README.md).

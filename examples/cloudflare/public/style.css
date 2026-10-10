@@ -90,7 +90,7 @@ fieldset, .byo { margin: 0; border: 1px solid var(--rule); border-radius: var(--
 legend { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--bronze); font-weight: 700; padding: 0 6px; margin-left: -6px; }
 label { display: grid; gap: 5px; font-size: 13.5px; font-weight: 500; color: var(--ink-2); }
 input:not([type=checkbox]):not([type=color]), select, textarea {
-  width: 100%; font: 14.5px var(--body); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 11px;
+  width: 100%; font: 16px var(--body); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 10px; padding: 8px 11px;
 }
 textarea { resize: vertical; min-height: 64px; }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -100,9 +100,9 @@ textarea { resize: vertical; min-height: 64px; }
 .switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 20%); transition: transform .15s; }
 .switch input:checked { background: var(--iris); }
 .switch input:checked::after { transform: translateX(15px); }
-.accent { display: flex; align-items: center; gap: 8px; }
+.accent { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .accent input[type=color] { width: 36px; height: 34px; padding: 2px; border: 1px solid var(--rule); border-radius: 9px; background: var(--paper); cursor: pointer; }
-.swatches { display: flex; gap: 5px; }
+.swatches { display: flex; flex-wrap: wrap; gap: 5px; }
 .swatches button { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--rule); cursor: pointer; padding: 0; }
 .byo summary { cursor: pointer; font-weight: 600; font-size: 14.5px; list-style: none; display: flex; justify-content: space-between; }
 .byo summary::after { content: "+"; color: var(--ink-3); }
@@ -157,7 +157,7 @@ textarea { resize: vertical; min-height: 64px; }
 .foot-row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 
 @media (max-width: 960px) {
-  .hero-grid, .play { grid-template-columns: 1fr; }
+  .hero-grid, .play { grid-template-columns: minmax(0, 1fr); }
   .hero-demo { display: none; }
   .preview { position: static; order: -1; }
   .flow { grid-template-columns: 1fr; }
@@ -165,12 +165,29 @@ textarea { resize: vertical; min-height: 64px; }
   .arrow::after { width: 2px; height: 22px; }
   .checks { grid-template-columns: 1fr; }
 }
+@media (min-width: 641px) and (max-width: 960px) {
+  .controls { grid-template-columns: 1fr 1fr; align-items: start; }
+  .controls > :nth-child(3), .controls > .byo { grid-column: 1 / -1; }
+}
 @media (max-width: 640px) {
-  .links a:not(.gh) { display: none; }
+  .links { gap: 16px; }
+  .links a:not(.gh):not([href="#playground"]) { display: none; }
+  .lead { font-size: 17px; }
+  .cta { flex-wrap: wrap; }
+  .facts { display: grid; grid-template-columns: repeat(3, auto); justify-content: start; gap: 18px; }
+  .row { grid-template-columns: 1fr; }
+  .tabs button { padding: 10px 12px 12px; }
+  .code-body pre { padding: 16px; font-size: 13px; }
+  .copy-code { top: 8px; right: 8px; }
   .hero { padding: 48px 0; }
   section { padding: 56px 0; }
   .stage { padding: 10px; }
   #preview { --dw-height: 520px; }
+}
+@media (pointer: coarse) {
+  .swatches { gap: 8px; }
+  .swatches button { width: 28px; height: 28px; }
+  .btn.small { height: 40px; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; scroll-behavior: auto !important; }

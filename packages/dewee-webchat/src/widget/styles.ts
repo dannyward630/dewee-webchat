@@ -76,6 +76,8 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 @media (max-width: 520px) {
   :host(:not([data-mode="inline"])) .panel { inset: 0; width: 100vw; height: 100dvh; border-radius: 0; border: 0; }
   :host([data-open]:not([data-mode="inline"])) .launcher { display: none; }
+  :host(:not([data-mode="inline"])) .head { padding-top: max(14px, env(safe-area-inset-top)); }
+  :host(:not([data-mode="inline"])) .composer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 }
 
 /* ---------- header ---------- */
@@ -93,7 +95,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .who { flex: 1; min-width: 0; }
 .title { font-weight: 650; font-size: 15px; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .subtitle { font-size: 12px; color: var(--dw-muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: #22c58b; box-shadow: 0 0 0 3px color-mix(in srgb, #22c58b 22%, transparent); }
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #22c58b; box-shadow: 0 0 0 3px color-mix(in srgb, #22c58b 22%, transparent); }
 .agent-select {
   font: inherit; font-size: 12px; color: var(--dw-muted); background: transparent; border: 0;
   padding: 0 14px 0 0; margin: 0; max-width: 170px; cursor: pointer; appearance: none; field-sizing: content; text-overflow: ellipsis;
@@ -203,7 +205,7 @@ details > summary svg.ic { width: 14px; height: 14px; flex: none; }
 .box:focus-within { border-color: var(--dw-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dw-accent) 16%, transparent); }
 textarea {
   flex: 1; resize: none; border: 0; outline: 0; background: transparent; color: var(--dw-fg);
-  font: inherit; font-size: 14.5px; line-height: 1.5; max-height: 140px; padding: 6px 0; min-height: 34px;
+  font: inherit; font-size: 16px; line-height: 1.45; max-height: 140px; padding: 5px 0; min-height: 34px;
 }
 textarea::placeholder { color: var(--dw-muted); }
 .send {
@@ -218,5 +220,9 @@ textarea::placeholder { color: var(--dw-muted); }
 .foot a:hover { color: var(--dw-accent); }
 .challenge:empty { display: none; }
 .challenge { display: flex; justify-content: center; padding: 8px 0; }
+/* iOS zooms into any focused field under 16px; keep touch-device fields at 16px. */
+@media (pointer: coarse) {
+  .agent-select { font-size: 16px; max-width: 200px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
 `;

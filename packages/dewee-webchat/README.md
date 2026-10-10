@@ -65,7 +65,7 @@ Create a scoped key with the Dewee CLI: `dewee api-keys create --name "website c
 
 ```html
 <script
-  src="https://webchat-cdn.dewee.sh/dewee-webchat@0.1.0/dewee-webchat.js"
+  src="https://webchat-cdn.dewee.sh/dewee-webchat@0.1.1/dewee-webchat.js"
   data-endpoint="/api/dewee"
   data-title="Support"
   data-suggestions="What do you do?|Pricing?"

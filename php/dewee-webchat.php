@@ -23,7 +23,7 @@ final class DeweeGatewayError extends RuntimeException
 
 final class DeweeWebchat
 {
-    public const VERSION = '0.1.0';
+    public const VERSION = '0.1.1';
     public const HEADER_GATEWAY_URL = 'x-dewee-gateway-url';
     public const HEADER_GATEWAY_TOKEN = 'x-dewee-gateway-token';
 
