@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `pnpm dev` / `pnpm preview`. Never commit .dev.vars.
+DEWEE_GATEWAY_TOKEN=your-gateway-token-or-operator-key
+# >= 32 random chars, e.g. node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+DEWEE_WEBCHAT_SECRET=change-me

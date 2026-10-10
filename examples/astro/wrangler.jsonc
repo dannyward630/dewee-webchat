@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dewee-webchat-astro",
+  "account_id": "7ac87c90789159ae1b10b7d78f5dcc08",
+  "main": "@astrojs/cloudflare/entrypoints/server",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": { "directory": "./dist", "binding": "ASSETS" },
+  "workers_dev": false,
+  "routes": [{ "pattern": "webchat-astro.dewee.sh", "custom_domain": true }],
+  "observability": { "enabled": true },
+  // Public settings. Secrets (DEWEE_GATEWAY_TOKEN, DEWEE_WEBCHAT_SECRET) go in .dev.vars locally
+  // and `wrangler secret put` in production.
+  "vars": {
+    "DEWEE_GATEWAY_URL": "https://dewee.zuey.me",
+    "DEWEE_AGENTS": "dewee-web-advisor,zuey-ai",
+    "DEWEE_DEFAULT_AGENT": "dewee-web-advisor"
+  }
+}

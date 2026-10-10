@@ -2,6 +2,13 @@
   "name": "example-astro",
   "private": true,
   "type": "module",
+  "scripts": {
+    "dev": "wrangler types && astro dev --port 4321",
+    "build": "wrangler types && astro build",
+    "preview": "pnpm build && astro preview --port 4321",
+    "deploy": "pnpm build && wrangler deploy",
+    "typecheck": "wrangler types && tsc --noEmit"
+  },
   "dependencies": {
     "@astrojs/cloudflare": "^14.3.4",
     "astro": "^7.3.8",

@@ -1,0 +1,110 @@
+---
+import DeweeChat from "dewee-webchat/astro";
+
+// Static page; only /api/dewee/* runs on demand in the Worker.
+export const prerender = true;
+
+const routeSnippet = `// src/pages/api/dewee/[...path].ts
+import type { APIRoute } from "astro";
+import { env } from "cloudflare:workers";
+import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
+
+export const prerender = false;
+let handler: ReturnType<typeof createDeweeHandler> | undefined;
+export const ALL: APIRoute = ({ request }) =>
+  (handler ??= createDeweeHandler(optionsFromEnv(env)))(request);`;
+
+// A literal frontmatter fence here would confuse the dependency scanner.
+const fence = "-".repeat(3);
+const pageSnippet = `${fence}
+import DeweeChat from "dewee-webchat/astro";
+${fence}
+<DeweeChat endpoint="/api/dewee" title="Dewee" accentColor="#5446e8" />`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Astro + dewee-webchat</title>
+    <meta name="description" content="Dewee AI chat widget in an Astro site on Cloudflare Workers." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;700&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Example</p>
+      <h1>Astro + dewee-webchat</h1>
+      <p>
+        This Astro site runs on Cloudflare Workers. One catch-all API route hands requests to the
+        <code>dewee-webchat/server</code> handler, so the gateway token stays in the Worker. The
+        <code>&lt;DeweeChat /&gt;</code> component adds the floating chat in the corner. Try it.
+      </p>
+
+      <h2>1. API route</h2>
+      <pre><code set:text={routeSnippet} /></pre>
+      <h2>2. Component</h2>
+      <pre><code set:text={pageSnippet} /></pre>
+
+      <p class="links">
+        <a href="https://webchat.dewee.sh">dewee-webchat docs</a>
+        <a href="https://github.com/nextlevelbuilder/dewee-webchat/tree/main/examples/astro">Source on GitHub</a>
+      </p>
+    </main>
+
+    <DeweeChat
+      endpoint="/api/dewee"
+      mode="floating"
+      title="Dewee"
+      subtitle="Astro example"
+      greeting="Hi there!"
+      intro="Ask about Dewee or have the agent read a web page for you."
+      accentColor="#5446e8"
+      suggestions={["What is Dewee?", "Read https://dewee.sh and summarize it in one sentence."]}
+    />
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --accent: #5446e8;
+    --ink: #1b1f4b;
+    color-scheme: light;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Be Vietnam Pro", system-ui, sans-serif;
+    color: var(--ink);
+    background: #f7f7fc;
+    line-height: 1.6;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 72px 24px 120px; }
+  .eyebrow {
+    margin: 0;
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 0.8rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  h1 { margin: 0.2em 0 0.5em; font-size: clamp(2rem, 5vw, 2.8rem); line-height: 1.15; }
+  h2 { margin: 2em 0 0.5em; font-size: 1rem; }
+  code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.9em; }
+  p code { background: #ebeafd; padding: 0.1em 0.35em; border-radius: 4px; }
+  pre {
+    margin: 0;
+    padding: 16px 18px;
+    overflow-x: auto;
+    background: var(--ink);
+    color: #e8e9ff;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    line-height: 1.55;
+  }
+  .links { display: flex; gap: 20px; margin-top: 2.5em; }
+  a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>

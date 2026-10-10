@@ -12,3 +12,4 @@ dist/
 .DS_Store
 .claude/
 cdn/public/
+plans/
