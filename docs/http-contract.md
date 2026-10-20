@@ -5,6 +5,7 @@ implements these four routes works with the widget — the Node/Workers handler 
 `dewee-webchat/server` and the single-file PHP backend in `php/` both do.
 
 Errors always use `{"error": {"message": string, "code": string}}` with a matching HTTP status.
+Identity errors of [signed-in users](#signed-in-users) add `remediation`.
 
 ## `GET {base}/config`
 
@@ -114,6 +115,74 @@ messages are ordinary chat messages, so rate limits and `maxMessageLength` apply
 
 **Errors** (JSON, before streaming): `400 invalid_actions`, `413 actions_too_large`, `413 context_too_large`.
 
+## Signed-in users
+
+Optional. A backend that signs users in through Dewee (the Node/Workers handler with the `identity`
+option; not the PHP backend yet) changes the routes below. Without it nothing here applies and every
+request and response is exactly as described above.
+
+**`GET {base}/config`** adds `"identity": true`, sets `allowAgentSwitch` to `false` and `defaultAgent`
+to the agent sessions are bound to. The widget then asks `/session` on every page load and keeps a
+signed-in session in memory only.
+
+**`POST {base}/session`** first asks the host who the visitor is (server side, from its own login):
+
+- Signed in: the backend exchanges the user for a Dewee identity session
+  (`POST {gateway}/v1/identity/sessions/exchange` with a signed partner assertion) and answers
+  `{ "visitorId", "token", "expiresAt", "verified": true }`. The visitor token carries two more claims,
+  `ids` (the Dewee identity session token: one agent, chat only, short-lived) and `ida` (its agent):
+  `base64url(JSON{"v", "exp", "ids", "ida"})`. `exp` is the earlier of the identity session expiry and
+  the visitor session lifetime. `visitorId` is derived from the Dewee principal, so the same user keeps
+  the same conversations everywhere. If the exchange fails, no token is issued.
+- Not signed in: an ordinary anonymous visitor token, unless the backend requires sign-in, in which case
+  the answer is `401 IDENTITY_REQUIRED` (or `503 SOURCE_UNAVAILABLE` when the host's login check failed).
+
+The gateway token, the partner assertion secret and the private key never appear in any response.
+
+**`POST {base}/chat`, `GET {base}/history`** with a token that carries `ids`: the backend connects with
+`{"token": …, "identity_session": <ids>, "tenant_id"?: …}` and no `user_id`; the gateway derives the user
+(`tuc:<principal>`). The request is bound to the token's user whatever cookies it carries, and only to
+the `ida` agent (another `agent` is `403 agent_not_allowed`). The connection is checked before the stream
+starts, so a refused session is a JSON error, not an SSE event. A token with `ids` is refused (401) by a
+backend that does not sign users in.
+
+**Identity errors.** The gateway's typed errors are forwarded with their remediation:
+
+```json
+{ "error": { "message": "Your session expired.", "code": "LINK_EXPIRED",
+             "remediation": { "action": "reauthenticate", "audience": "end_user" } } }
+```
+
+| `code` | Status | |
+|---|---|---|
+| `IDENTITY_REQUIRED` | 401 | No valid identity (not signed in, unknown session) |
+| `LINK_EXPIRED` | 401 | The identity session expired; the widget asks `/session` again |
+| `LINK_REVOKED` | 401 | Access was revoked or the user suspended; the widget asks `/session` again |
+| `IDENTITY_LINK_REQUIRED` | 403 | The chat account is not linked yet |
+| `PERMISSION_DENIED` | 403 | Verified but not allowed (for example another agent) |
+| `IDENTITY_CONFLICT` | 409 | The account is linked to another user |
+| `SOURCE_UNAVAILABLE` | 503 | Identity could not be checked; nothing ran |
+
+An identity error raised during a run arrives as the SSE event
+`{"type": "error", "message", "code", "remediation"}`. The widget shows its own localized text for
+each code and, after `LINK_EXPIRED` or `LINK_REVOKED`, requests `/session` again. Other exchange
+failures are `502 gateway_error`, `429 rate_limited` or `500 identity_misconfigured`, without detail.
+
+### `POST {base}/link`
+
+Web-first linking of a chat account for a signed-in user. Headers: `Authorization: Bearer <visitor
+token with ids>`. Body: `{ "idempotencyKey"?: string }` (1 to 255 printable ASCII characters). The
+backend calls `POST {gateway}/v1/identity/links` with the identity session and answers:
+
+```json
+{ "proofCode": "482913", "expiresAt": 1791621449203,
+  "deepLinks": [{ "channelType": "telegram", "channelInstanceId": "…", "name": "acme-bot", "displayName": "Acme Bot" }] }
+```
+
+The user sends `proofCode` in a direct message from the chat account to link; Dewee checks both sides
+and links on its own. Nobody types an account id. A visitor without an identity session gets
+`401 IDENTITY_REQUIRED`; a backend that does not sign users in answers `404`.
+
 ## `GET {base}/history?agent=…&conversationId=…`
 
 Headers: `Authorization: Bearer <visitor token>`. Returns the visitor's own conversation:
@@ -138,6 +207,8 @@ refused unless explicitly allowlisted.
 The backend opens a WebSocket to `{gateway}/ws` (protocol v3):
 
 1. `{"type":"req","id":"1","method":"connect","params":{"token":…,"user_id":"webchat-<visitorId>","tenant_id"?:…}}`
+   (for a signed-in user: `"identity_session": …` instead of `user_id`; a refused session answers
+   `{"ok":false,"error":{"code":"LINK_EXPIRED",…,"details":{"remediation":{…}}}}`)
 2. `{"type":"req","id":"2","method":"chat.send","params":{"agentId":…,"sessionKey":…,"message":…,"stream":true}}`
 3. Gateway pushes `{"type":"event","event":"agent","payload":{"type":…,"sessionKey":…,"payload":{…}}}`
    with `type` ∈ `run.started`, `thinking {content}`, `chunk {content}`, `tool.call {id,name,arguments}`,

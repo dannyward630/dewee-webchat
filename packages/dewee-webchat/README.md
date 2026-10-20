@@ -129,8 +129,9 @@ Attributes use kebab-case (`show-reasoning="false"`), `data-*` on the script tag
 | `actionTimeoutMs` | `30000` | Per-handler timeout |
 
 Methods: `open()`, `close()`, `toggle()`, `send(text)`, `stop()`, `newConversation()`, `configure(partial)`,
-`registerActions(actions)`, `unregisterAction(name)`.
-Events: `dewee:ready`, `dewee:open`, `dewee:close`, `dewee:send`, `dewee:reply`, `dewee:error`, `dewee:action`.
+`registerActions(actions)`, `unregisterAction(name)`, and for [signed-in users](#signed-in-users)
+`renewSession()` and `startLink()`.
+Events: `dewee:ready`, `dewee:open`, `dewee:close`, `dewee:send`, `dewee:reply`, `dewee:error`, `dewee:action`, `dewee:link`.
 CSS variables: `--dw-accent`, `--dw-font`, `--dw-radius`, `--dw-width`, `--dw-height`, `--dw-z`.
 
 ## Agent page actions
@@ -195,10 +196,84 @@ or inserts it as HTML, caps calls per answer and automatic turns per message, an
 `mutate`/`destructive` handler without approval. Page context and results are labelled as data for the
 agent, but prompt injection through page content is still possible — do not put secrets in either.
 
+## Signed-in users
+
+When your site knows who the visitor is, the agent can know it too, with private tools that act for
+that user only. You pass one server-side callback. You do not mint tokens, store per-visitor
+credentials or put anything secret in the page: the handler exchanges your user for a Dewee identity
+session, and the gateway derives the user from it.
+
+```ts
+import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
+
+const handler = createDeweeHandler({
+  ...optionsFromEnv(process.env),
+  identity: {
+    // Your own login. Return null for a visitor who is not signed in.
+    authenticate: async (req) => {
+      const user = await getUserFromSessionCookie(req.headers.get("cookie"));
+      return user ? { subject: user.id } : null; // your stable id, never an email address
+    },
+    appId: process.env.DEWEE_IDENTITY_APP_ID!,
+    issuer: process.env.DEWEE_IDENTITY_ISSUER!,
+    assertionSecret: process.env.DEWEE_IDENTITY_ASSERTION_SECRET!, // or privateKeyJwk for a jwks application
+  },
+});
+```
+
+Setup: create the application once with `dewee identity setup --name <site> --issuer <issuer>` (it
+prints the application id and the assertion secret), and install the server SDK next to this package:
+`npm install @dewee/identity`. It is an optional peer dependency, loaded only when `identity` is set.
+`@dewee/identity` is not on npm yet: until it is, build its tarball from the
+[dewee repository](https://github.com/nextlevelbuilder/dewee/blob/dev/packages/dewee-identity/README.md)
+(`pnpm --filter @dewee/identity pack`) and install that file.
+
+| `identity` option | |
+|---|---|
+| `authenticate(req)` | Required. Resolves `{ subject }` for a signed-in user, `null` otherwise. |
+| `appId`, `issuer` | Required. The Dewee application id and its issuer, exactly. |
+| `assertionSecret` \| `privateKeyJwk` (+ `algorithm`) | Exactly one: `hmac` or `jwks` application. Server only. |
+| `audience` | Optional check; must be `dewee:<appId>`. |
+| `agent` | The agent sessions are bound to. Default: `defaultAgent`, else the first of `agents`. |
+| `required` | Default `false`. When `true`, visitors who are not signed in get no session at all. |
+| `sessionTtlSeconds` | 60 to 43200. Default: the gateway default (3600). |
+| `allowInsecureHttp` | Allow plain http to a gateway that is not loopback (private networks only). |
+
+How it behaves:
+
+- `POST /session` calls `authenticate`. For a user it calls `exchangeSession` and returns a visitor token
+  that carries the Dewee session (one agent, chat only, short-lived; it expires with the session). The
+  gateway token, the assertion secret and the private key never reach the browser.
+- `/chat` and `/history` connect to the gateway with that `identity_session` and no `user_id`. A
+  visitor token for user A keeps chatting as A even if a later request carries B's cookie; a token
+  that was altered is refused (401). The same user gets the same conversations on every device.
+- Fail closed. If `authenticate` returns `null` or throws, the visitor chats anonymously, exactly as
+  without `identity`, unless `required` is set, in which case no session is issued. If the exchange
+  for a signed-in user fails, no session is issued: a user is never silently downgraded.
+- `DEWEE_GATEWAY_TOKEN` must be a tenant API key without an owner: the gateway refuses an identity
+  session next to a key bound to a user (`IDENTITY_CONFLICT`).
+- `identity` cannot be combined with `allowClientCredentials` (the handler refuses to start). Sessions
+  are bound to one agent, so `/config` turns the agent picker off.
+- Gateway identity errors (`IDENTITY_REQUIRED`, `IDENTITY_LINK_REQUIRED`, `LINK_EXPIRED`, `LINK_REVOKED`,
+  `PERMISSION_DENIED`, `SOURCE_UNAVAILABLE`, `IDENTITY_CONFLICT`) reach the widget as
+  `{ error: { code, remediation } }`. The widget shows its own localized message and, on `LINK_EXPIRED`
+  or `LINK_REVOKED`, asks `/session` again.
+- The widget keeps a signed-in session in memory only, so each page load asks your backend who the
+  visitor is. Call `chat.renewSession()` after a sign-in or sign-out without a page load.
+
+**Linking a chat app.** A signed-in user can link their Telegram, Discord or other chat account
+without typing any id: call `chat.startLink()`. The widget asks `POST {endpoint}/link`, which starts
+a Dewee web-first link, and shows the proof code with "Continue on Telegram" for each chat account
+the code can be sent to. The user sends the code in a direct message; Dewee checks both sides and
+links on its own. `dewee:link` fires with `{ expiresAt, deepLinks }`.
+
+The PHP backend does not support signed-in users yet (it has no JWS signing); use the Node/Workers handler.
+
 ## Security model
 
 - The gateway token never leaves your server. Browsers get an HMAC-signed visitor id.
 - Each visitor gets its own gateway user (`webchat-<id>`) and session keys, so history is private to them.
+  A [signed-in user](#signed-in-users) is the user the gateway derives from their Dewee identity session.
 - Only allowlisted agents are reachable; origin allowlist, rate limits (20 messages/min per visitor, 10
   new sessions/10 min per IP by default — pass `rateLimit` for a shared store), 4000-char messages,
   optional Turnstile.
