@@ -154,3 +154,50 @@ describe("foldHistory", () => {
     expect(foldHistory([{ role: "user", content: "a" }, { role: "assistant", content: "" }])).toHaveLength(1);
   });
 });
+
+describe("page actions", () => {
+  const nav = { name: "navigate", description: "Go to a route", sensitivity: "navigate", parameters: { type: "object", properties: { route: { type: "string", enum: ["/", "/runs"] } } } };
+  const chat = async (body: Record<string, unknown>) => {
+    const h = handler();
+    const s = await session(h);
+    return h(new Request("https://site.test/api/dewee/chat", { method: "POST", headers: { authorization: `Bearer ${s.token}` }, body: JSON.stringify({ conversationId: "conv_actions1", ...body }) }));
+  };
+
+  it("leaves the gateway message and start event unchanged without actions", async () => {
+    const events = await readSse(await chat({ message: "plain" }));
+    expect(seen.sends.at(-1).message).toBe("plain");
+    expect(events[0]).not.toHaveProperty("actionsHash");
+  });
+
+  it("prepends the manifest and page context, then only a reference once acknowledged", async () => {
+    const first = await readSse(await chat({ message: "open runs", actions: [nav], pageContext: { route: "/" } }));
+    const hash = (first[0] as any).actionsHash;
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+    const sent = seen.sends.at(-1).message as string;
+    expect(sent.startsWith("[[dewee-page v1]]\n")).toBe(true);
+    expect(sent).toContain('"name":"navigate"');
+    expect(sent).toContain('Page context: {"route":"/"}');
+    expect(sent.endsWith("[[/dewee-page]]\n\nopen runs")).toBe(true);
+
+    await readSse(await chat({ message: "again", actions: [nav], actionsHash: hash }));
+    const short = seen.sends.at(-1).message as string;
+    expect(short).not.toContain('"name":"navigate"');
+    expect(short).toContain(`Page actions unchanged (manifest ${hash})`);
+  });
+
+  it("rejects invalid or oversized actions and page context", async () => {
+    const code = async (body: Record<string, unknown>) => {
+      const r = await chat({ message: "x", ...body });
+      return [r.status, (await r.json()).error.code];
+    };
+    expect(await code({ actions: [{ ...nav, name: "Bad Name" }] })).toEqual([400, "invalid_actions"]);
+    expect(await code({ actions: "nope" })).toEqual([400, "invalid_actions"]);
+    expect(await code({ actions: Array.from({ length: 33 }, (_, i) => ({ ...nav, name: `a${i}` })) })).toEqual([413, "actions_too_large"]);
+    expect(await code({ pageContext: { blob: "x".repeat(5000) } })).toEqual([413, "context_too_large"]);
+  });
+
+  it("strips the page block from user messages in history", () => {
+    const folded = foldHistory([{ role: "user", content: "[[dewee-page v1]]\nPage context: {}\n[[/dewee-page]]\n\nhello" }]);
+    expect(folded[0].content).toBe("hello");
+  });
+});

@@ -1,0 +1,73 @@
+// Checks that php/dewee-webchat.php builds the same page-action block as the TypeScript handler.
+// Runs when a PHP 8.1+ binary is available (PHP_BIN or `php` on PATH); skipped otherwise.
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+import { ActionInputError, buildPageBlock, hashManifest, normalizeManifest, serializePageContext, stripPageBlock } from "../src/actions/page-block";
+
+const PHP = process.env.PHP_BIN || "php";
+const hasPhp = spawnSync(PHP, ["-v"]).status === 0;
+const phpFile = resolve(__dirname, "../../../php/dewee-webchat.php");
+
+const script = `<?php
+require ${JSON.stringify(phpFile)};
+$cases = json_decode(stream_get_contents(STDIN), false);
+$out = [];
+foreach ($cases as $c) {
+  try {
+    $m = $c->actions !== null ? DeweeWebchat::normalizeManifest($c->actions) : null;
+    $ctx = DeweeWebchat::serializePageContext($c->pageContext ?? null);
+    $h = $m ? DeweeWebchat::hashManifest($m) : null;
+    $block = DeweeWebchat::buildPageBlock($m, $h, ($c->ack ?? null) !== $h, $ctx);
+    $out[] = ['block' => $block, 'hash' => $h, 'stripped' => DeweeWebchat::stripPageBlock($block . 'hello')];
+  } catch (DeweeActionInputError $e) {
+    $out[] = ['error' => $e->errorCode, 'status' => $e->status];
+  }
+}
+echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+`;
+
+interface Case { actions: unknown; pageContext?: unknown; ack?: string }
+
+async function tsSide(c: Case) {
+  try {
+    const m = c.actions != null ? normalizeManifest(c.actions) : undefined;
+    const ctx = serializePageContext(c.pageContext);
+    const h = m?.length ? await hashManifest(m) : null;
+    const block = buildPageBlock({ manifest: m, hash: h ?? undefined, includeManifest: c.ack !== (h ?? undefined), pageContext: ctx });
+    return { block, hash: h, stripped: stripPageBlock(block + "hello") };
+  } catch (e) {
+    if (e instanceof ActionInputError) return { error: e.code, status: e.status };
+    throw e;
+  }
+}
+
+const nav = { name: "navigate", description: "Go to a dashboard route — “Tổng quan”", sensitivity: "navigate", parameters: { type: "object", properties: { route: { type: "string", enum: ["/", "/runs"] } }, required: ["route"] } };
+const del = { name: "runs.delete", description: "Delete a run", sensitivity: "destructive", parameters: { type: "object", properties: {} } };
+
+describe.skipIf(!hasPhp)("PHP backend parity (page actions)", () => {
+  it("builds identical blocks, hashes and errors", async () => {
+    const cases: Case[] = [
+      { actions: [nav, del], pageContext: { route: "/runs", filter: { status: "failed" } } },
+      { actions: [nav, del], pageContext: { route: "/" }, ack: "will-be-replaced" },
+      { actions: [nav] },
+      { actions: null, pageContext: { only: "context" } },
+      { actions: [] },
+      { actions: [{ ...nav, name: "Bad Name" }] },
+      { actions: [nav, nav] },
+      { actions: [{ ...nav, sensitivity: "admin" }] },
+      { actions: [nav], pageContext: { big: "x".repeat(5000) } },
+    ];
+    // case 2: ack equals the real hash, so the manifest is not repeated
+    cases[1].ack = (await tsSide({ actions: [nav, del] })).hash!;
+    const dir = mkdtempSync(join(tmpdir(), "dewee-php-"));
+    writeFileSync(join(dir, "parity.php"), script);
+    const php = JSON.parse(execFileSync(PHP, [join(dir, "parity.php")], { input: JSON.stringify(cases) }).toString());
+    const ts = await Promise.all(cases.map(tsSide));
+    expect(php).toEqual(ts);
+    expect(ts[1].block).toContain("Page actions unchanged");
+    expect(ts[2].stripped).toBe("hello");
+  });
+});

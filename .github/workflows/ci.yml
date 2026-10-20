@@ -28,3 +28,11 @@ jobs:
         with:
           php-version: "8.2"
       - run: php -l php/dewee-webchat.php
+      # Page-action block/hash parity between the PHP and TypeScript backends.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -C packages/dewee-webchat exec vitest run test/php-parity.test.ts

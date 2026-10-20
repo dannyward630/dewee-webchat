@@ -1,6 +1,6 @@
-// React wrapper. Usage: <DeweeChat endpoint="/api/dewee" showReasoning={false} />
+// React wrapper. Usage: <DeweeChat endpoint="/api/dewee" showReasoning={false} actions={[...]} />
 import { createElement, forwardRef, useEffect, useImperativeHandle, useRef, type CSSProperties } from "react";
-import { defineDeweeChat, type DeweeChatConfig, type DeweeChatElement } from "./index";
+import { defineDeweeChat, type ActionEventDetail, type DeweeChatConfig, type DeweeChatElement } from "./index";
 
 export interface DeweeChatProps extends Partial<DeweeChatConfig> {
   className?: string;
@@ -11,6 +11,8 @@ export interface DeweeChatProps extends Partial<DeweeChatConfig> {
   onError?: (e: CustomEvent) => void;
   onOpen?: (e: CustomEvent) => void;
   onClose?: (e: CustomEvent) => void;
+  /** Page action telemetry (`dewee:action`, detail: ActionEventDetail). */
+  onAction?: (e: CustomEvent<ActionEventDetail>) => void;
 }
 
 const EVENTS = {
@@ -20,13 +22,14 @@ const EVENTS = {
   onError: "dewee:error",
   onOpen: "dewee:open",
   onClose: "dewee:close",
+  onAction: "dewee:action",
 } as const;
 type EventProp = keyof typeof EVENTS;
 
 export const DeweeChat = forwardRef<DeweeChatElement | null, DeweeChatProps>(function DeweeChat(props, ref) {
   const el = useRef<DeweeChatElement | null>(null);
-  const { className, style, onReady, onSend, onReply, onError, onOpen, onClose, ...config } = props;
-  const handlers: Partial<Record<EventProp, (e: CustomEvent) => void>> = { onReady, onSend, onReply, onError, onOpen, onClose };
+  const { className, style, onReady, onSend, onReply, onError, onOpen, onClose, onAction, actions, confirm, getPageContext, ...config } = props;
+  const handlers: Partial<Record<EventProp, (e: CustomEvent<any>) => void>> = { onReady, onSend, onReply, onError, onOpen, onClose, onAction };
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   useImperativeHandle(ref, () => el.current!, []);
@@ -36,6 +39,13 @@ export const DeweeChat = forwardRef<DeweeChatElement | null, DeweeChatProps>(fun
     defineDeweeChat();
     el.current?.configure(JSON.parse(configKey));
   }, [configKey]);
+
+  // Functions and handlers cannot go through the JSON config key; they are applied on every render
+  // without re-rendering the widget (inline `actions={[...]}` arrays are fine).
+  useEffect(() => {
+    defineDeweeChat();
+    el.current?.configure({ actions, confirm, getPageContext });
+  });
 
   useEffect(() => {
     const node = el.current;
@@ -53,6 +63,7 @@ export const DeweeChat = forwardRef<DeweeChatElement | null, DeweeChatProps>(fun
 });
 
 export default DeweeChat;
+export type { ActionConfirmHook, ActionEventDetail, PageAction, PageActionContext } from "./index";
 export type { DeweeChatConfig, DeweeChatElement };
 
 declare module "react" {

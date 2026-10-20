@@ -1,18 +1,19 @@
 // Vue 3 wrapper. Usage: <DeweeChat endpoint="/api/dewee" :show-tool-calls="false" @reply="onReply" />
 import { defineComponent, h, onMounted, ref, watch, type PropType } from "vue";
-import { defineDeweeChat, type DeweeChatConfig, type DeweeChatElement } from "./index";
+import { defineDeweeChat, type DeweeChatConfig, type DeweeChatElement, type PageAction } from "./index";
 
 const keys = [
   "endpoint", "agent", "title", "subtitle", "greeting", "intro", "placeholder", "suggestions", "avatar", "launcherAvatar",
   "position", "mode", "theme", "accentColor", "locale", "showReasoning", "showToolCalls", "allowAgentSwitch", "open",
-  "persist", "hideBranding", "gatewayUrl", "gatewayToken", "width", "height", "zIndex",
+  "persist", "hideBranding", "gatewayUrl", "gatewayToken", "width", "height", "zIndex", "actions", "confirm", "getPageContext",
+  "maxActionRounds", "actionTimeoutMs",
 ] as const;
 
 const props = Object.fromEntries(keys.map((k) => [k, { type: null as unknown as PropType<any>, default: undefined }])) as {
   [K in (typeof keys)[number]]: { type: PropType<any>; default: undefined };
 };
 
-const EVENTS = ["ready", "send", "reply", "error", "open", "close"] as const;
+const EVENTS = ["ready", "send", "reply", "error", "open", "close", "action"] as const;
 
 export const DeweeChat = defineComponent({
   name: "DeweeChat",
@@ -35,10 +36,13 @@ export const DeweeChat = defineComponent({
       close: () => el.value?.close(),
       send: (text: string) => el.value?.send(text),
       newConversation: () => el.value?.newConversation(),
+      registerActions: (actions: PageAction | PageAction[]) => el.value?.registerActions(actions),
+      unregisterAction: (name: string) => el.value?.unregisterAction(name),
     });
     return () => h("dewee-chat", { ref: el, endpoint: p.endpoint, mode: p.mode });
   },
 });
 
 export default DeweeChat;
+export type { ActionConfirmHook, ActionEventDetail, PageAction, PageActionContext } from "./index";
 export type { DeweeChatConfig, DeweeChatElement };

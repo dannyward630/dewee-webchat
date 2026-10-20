@@ -2,6 +2,7 @@
 // Runs on Cloudflare Workers (fetch upgrade) and on any runtime with a global WebSocket
 // (Node >= 22, Bun, Deno, Workers with the WebSocket constructor).
 import type { AgentInfo, ChatStreamEvent, HistoryMessage, ToolCallView } from "../protocol";
+import { stripPageBlock } from "../actions/page-block";
 
 export interface GatewayCredentials {
   /** Gateway runtime origin, e.g. https://gateway.example.com */
@@ -220,7 +221,7 @@ export function foldHistory(raw: any[]): HistoryMessage[] {
   for (const m of raw) {
     if (m.role === "user") {
       current = null;
-      out.push({ role: "user", content: String(m.content ?? ""), createdAt: m.created_at });
+      out.push({ role: "user", content: stripPageBlock(String(m.content ?? "")), createdAt: m.created_at });
     } else if (m.role === "assistant") {
       if (!current) {
         current = { role: "assistant", content: "", createdAt: m.created_at };
