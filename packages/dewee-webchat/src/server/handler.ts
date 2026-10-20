@@ -1,24 +1,95 @@
 // Framework-agnostic backend: (Request) => Promise<Response>.
 // Routes are matched by the last path segment, so mount it under any prefix
-// (e.g. /api/dewee/[...path]): GET config | POST session | POST chat | GET history | OPTIONS.
+// (e.g. /api/dewee/[...path]): GET config | POST session | POST chat | GET history | POST link (identity) | OPTIONS.
 import {
   HEADER_GATEWAY_TOKEN,
   HEADER_GATEWAY_URL,
   VERSION,
+  isIdentityErrorCode,
   type AgentInfo,
   type ChatStreamEvent,
+  type IdentityErrorCode,
+  type LinkResponse,
   type PublicConfig,
+  type Remediation,
+  type SessionResponse,
 } from "../protocol";
+// Type-only: erased at build time. The SDK itself is loaded lazily, in identity mode only.
+import type { AssertionSigner } from "@dewee/identity";
 import { ActionInputError, buildPageBlock, hashManifest, normalizeManifest, serializePageContext } from "../actions/page-block";
-import { buildSessionKey, fetchHistory, listAgents, streamChat, type GatewayCredentials, type GatewayError } from "./gateway-client";
 import {
+  GatewayConnection,
+  GatewayError,
+  buildSessionKey,
+  fetchHistory,
+  listAgents,
+  streamChat,
+  type GatewayActor,
+  type GatewayCredentials,
+} from "./gateway-client";
+import {
+  deriveVisitorId,
   memoryRateLimiter,
   randomId,
   signVisitorToken,
   verifyTurnstile,
   verifyVisitorToken,
   type RateLimiter,
+  type VisitorClaims,
 } from "./security";
+
+/** A signed-in user of the host app, as `identity.authenticate` reports it. */
+export interface AuthenticatedUser {
+  /** Your stable, opaque user id. Never an email address (an id containing "@" is refused). */
+  subject: string;
+  /**
+   * Reserved. The Dewee session exchange carries no scopes, so this value is not sent anywhere.
+   * Report scope changes with `lifecycle({ event: "scopes_changed" })` from `@dewee/identity`.
+   */
+  scopes?: string[];
+}
+
+/** A private JWK whose public half is published in the application's `jwks_url`. */
+export interface IdentityPrivateJwk {
+  kty: string;
+  kid: string;
+  d: string;
+  alg?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Verified signed-in users through a Dewee identity session exchange. The host passes one
+ * server-side callback; the handler exchanges the user for a limited Dewee session (one agent,
+ * chat only, short-lived) and the gateway derives the user from it.
+ */
+export interface DeweeIdentityOptions {
+  /** Reads your own login (cookie, header…). Return null for a visitor who is not signed in. */
+  authenticate(req: Request): Promise<AuthenticatedUser | null>;
+  /** Dewee application id (`dewee identity setup` prints it). */
+  appId: string;
+  /** The issuer configured on the application, exactly. */
+  issuer: string;
+  /** Optional check: must equal `dewee:<appId>`, the audience Dewee issued the application. */
+  audience?: string;
+  /** Assertion secret of an `hmac` application. Exactly one of this or `privateKeyJwk`. */
+  assertionSecret?: string;
+  /** Private signing key of a `jwks` application (RS256, ES256 or EdDSA, with `kid`). */
+  privateKeyJwk?: IdentityPrivateJwk;
+  /** Algorithm of `privateKeyJwk`; defaults to its `alg`. */
+  algorithm?: "RS256" | "ES256" | "EdDSA";
+  /** The agent identity sessions are bound to. Default: `defaultAgent`, else the first of `agents`. */
+  agent?: string;
+  /**
+   * Refuse visitors who are not signed in (no anonymous fallback). Default false: a visitor for whom
+   * `authenticate` returns null, or throws, chats anonymously exactly as without this option.
+   */
+  required?: boolean;
+  /** Identity session lifetime, 60 to 43200 seconds. Default: the gateway default (3600). */
+  sessionTtlSeconds?: number;
+  /** Allow plain http to a gateway that is not loopback (private networks only). */
+  allowInsecureHttp?: boolean;
+}
 
 export interface DeweeHandlerOptions {
   /** Gateway runtime origin. Required unless every request brings its own credentials. */
@@ -52,12 +123,66 @@ export interface DeweeHandlerOptions {
   timeoutMs?: number;
   /** Observe traffic (logging/analytics). Errors thrown here are ignored. */
   onChat?: (info: { visitorId: string; agent: string; message: string; reply?: string; error?: string }) => void;
+  /**
+   * Verified signed-in users through Dewee (needs the `@dewee/identity` package). Absent: every
+   * visitor is anonymous, exactly as before. Cannot be combined with `allowClientCredentials`.
+   */
+  identity?: DeweeIdentityOptions;
 }
 
 type Handler = (request: Request) => Promise<Response>;
 
 const ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
 const AGENT_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+const IDEMPOTENCY_KEY_RE = /^[\x21-\x7E]{1,255}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** HTTP status and fallback text of each identity error. The widget shows its own localized copy. */
+const IDENTITY_ERRORS: Record<IdentityErrorCode, { status: number; message: string; action: string }> = {
+  IDENTITY_REQUIRED: { status: 401, message: "Sign in to continue.", action: "reauthenticate" },
+  LINK_EXPIRED: { status: 401, message: "Your session expired.", action: "reauthenticate" },
+  LINK_REVOKED: { status: 401, message: "Your access was revoked.", action: "reauthenticate" },
+  IDENTITY_LINK_REQUIRED: { status: 403, message: "Link your account to continue.", action: "send_connect_link" },
+  PERMISSION_DENIED: { status: 403, message: "You are not allowed to do this.", action: "contact_admin" },
+  IDENTITY_CONFLICT: { status: 409, message: "This account is linked to another user.", action: "contact_admin" },
+  SOURCE_UNAVAILABLE: { status: 503, message: "Your sign-in could not be checked. Try again later.", action: "retry_later" },
+};
+
+type IdentitySdk = typeof import("@dewee/identity");
+let identitySdk: Promise<IdentitySdk> | undefined;
+
+/** Loads `@dewee/identity` on first use, so anonymous-only deployments never need it installed. */
+function loadIdentitySdk(): Promise<IdentitySdk> {
+  return (identitySdk ??= import("@dewee/identity").catch((e: unknown) => {
+    identitySdk = undefined;
+    throw new Error(`identity mode needs the @dewee/identity package (${(e as Error)?.message ?? "not installed"})`);
+  }));
+}
+
+/** Validates the identity options once, at startup, and returns the agent sessions are bound to. */
+function checkIdentityOptions(o: DeweeHandlerOptions, staticAgents: AgentInfo[]): string {
+  const idn = o.identity!;
+  const refuse = (why: string): never => {
+    throw new Error(`[dewee-webchat] identity: ${why}`);
+  };
+  if (o.allowClientCredentials) refuse("cannot be combined with allowClientCredentials (a visitor-chosen gateway must never receive a user's session)");
+  if (!o.gatewayUrl || !o.token) refuse("needs the server's own gatewayUrl and token");
+  if (typeof idn.authenticate !== "function") refuse("authenticate(req) is required");
+  if (typeof idn.appId !== "string" || !UUID_RE.test(idn.appId)) refuse("appId must be the Dewee application id (a UUID)");
+  if (typeof idn.issuer !== "string" || idn.issuer.trim() === "") refuse("issuer is required");
+  if (idn.audience !== undefined && String(idn.audience).toLowerCase() !== `dewee:${idn.appId.toLowerCase()}`) refuse("audience must be dewee:<appId>");
+  const hasSecret = idn.assertionSecret !== undefined && idn.assertionSecret !== "";
+  const hasJwk = idn.privateKeyJwk !== undefined;
+  if (hasSecret === hasJwk) refuse("set exactly one of assertionSecret or privateKeyJwk");
+  if (hasSecret && new TextEncoder().encode(idn.assertionSecret!).length < 32) refuse("assertionSecret is too short (at least 32 bytes)");
+  if (hasJwk && (typeof idn.privateKeyJwk!.d !== "string" || typeof idn.privateKeyJwk!.kid !== "string")) refuse("privateKeyJwk must be a private JWK with a kid");
+  const ttl = idn.sessionTtlSeconds;
+  if (ttl !== undefined && (!Number.isInteger(ttl) || ttl < 60 || ttl > 43200)) refuse("sessionTtlSeconds must be an integer from 60 to 43200");
+  const agent = idn.agent || o.defaultAgent || staticAgents[0]?.id;
+  if (!agent || !AGENT_RE.test(agent)) refuse("no agent to bind sessions to: set identity.agent, defaultAgent or agents");
+  if (staticAgents.length && !staticAgents.some((a) => a.id === agent)) refuse(`agent "${agent}" is not in agents`);
+  return agent!;
+}
 
 export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
   const o = {
@@ -78,6 +203,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     o.agents === "*" ? [] : (o.agents ?? []).map((a) => (typeof a === "string" ? { id: a } : a));
   const wildcardAgents = o.agents === "*";
   const byo = o.allowClientCredentials ? (o.allowClientCredentials === true ? {} : o.allowClientCredentials) : null;
+  const idn = o.identity;
+  const identityAgent = idn ? checkIdentityOptions(o, staticAgents) : "";
 
   function serverCreds(): GatewayCredentials | null {
     return o.gatewayUrl && o.token ? { url: o.gatewayUrl, token: o.token, tenantId: o.tenantId } : null;
@@ -142,14 +269,83 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     });
   const fail = (req: Request, status: number, message: string, code = "bad_request") => json(req, { error: { message, code } }, status);
 
+  /** A typed identity error: `{error: {message, code, remediation}}`. Never carries a token or secret. */
+  const identityFail = (req: Request, code: IdentityErrorCode, remediation?: Remediation) => {
+    const e = IDENTITY_ERRORS[code];
+    return json(req, { error: { message: e.message, code, remediation: remediation ?? { action: e.action, audience: "end_user" } } }, e.status);
+  };
+
+  /** Gateway WebSocket failure: identity codes are forwarded typed, anything else stays a gateway error. */
+  const gatewayFail = (req: Request, e: unknown) =>
+    e instanceof GatewayError && isIdentityErrorCode(e.code) ? identityFail(req, e.code, e.remediation) : fail(req, 502, (e as Error).message, "gateway_error");
+
+  /** `@dewee/identity` failure (exchange, link): typed identity codes are forwarded; SDK messages are not. */
+  const sdkFail = (req: Request, e: unknown, what: string) => {
+    const code = (e as { code?: unknown })?.code;
+    if (isIdentityErrorCode(code)) {
+      console.warn(`[dewee-webchat] identity ${what} refused: ${code}`);
+      return identityFail(req, code, (e as { remediation?: Remediation }).remediation);
+    }
+    console.warn(`[dewee-webchat] identity ${what} failed:`, code ?? e);
+    if (code === "RESOURCE_EXHAUSTED") return fail(req, 429, "Too many sign-ins, slow down", "rate_limited");
+    if (code === "INVALID_ARGUMENT" || code === "SERVER_ONLY") return fail(req, 500, "Signed-in chat is misconfigured on this server", "identity_misconfigured");
+    return fail(req, 502, "Dewee is unavailable, try again later", "gateway_error");
+  };
+
   const clientIp = (req: Request) =>
     req.headers.get("cf-connecting-ip") || req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for")?.split(",")[0].trim() || "unknown";
 
-  async function visitorFrom(req: Request): Promise<string | null> {
+  /** The verified visitor token of the request. A token carrying an identity session is honored only in identity mode. */
+  async function visitorFrom(req: Request): Promise<VisitorClaims | null> {
     const auth = req.headers.get("authorization") || "";
     const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
     const claims = token ? await verifyVisitorToken(secret!, token) : null;
-    return claims?.v ?? null;
+    if (claims?.ids && !idn) return null;
+    return claims;
+  }
+
+  /** Agent of a request: an identity session is bound to its agent; anything else follows the allowlist. */
+  async function agentFor(claims: VisitorClaims, requested: string | null | undefined, creds: GatewayCredentials | null, isByo: boolean): Promise<string | null> {
+    if (claims.ids) return !requested || requested === claims.ida ? claims.ida! : null;
+    return pickAgent(requested, creds, isByo);
+  }
+
+  const actorOf = (claims: VisitorClaims): GatewayActor => (claims.ids ? { identitySession: claims.ids } : o.userIdPrefix + claims.v);
+
+  function identitySigner(): AssertionSigner {
+    if (idn!.assertionSecret) return { applicationId: idn!.appId, issuer: idn!.issuer, secret: idn!.assertionSecret };
+    // IdentityPrivateJwk is the JSON shape of jose's JWK, which the SDK types the key as.
+    return { applicationId: idn!.appId, issuer: idn!.issuer, privateKeyJwk: idn!.privateKeyJwk as AssertionSigner["privateKeyJwk"], algorithm: idn!.algorithm };
+  }
+
+  /** Exchanges a signed-in user for a Dewee identity session and wraps it in a visitor token. */
+  async function issueIdentitySession(req: Request, subject: string): Promise<Response> {
+    let sdk: IdentitySdk;
+    try {
+      sdk = await loadIdentitySdk();
+    } catch (e) {
+      console.error("[dewee-webchat]", (e as Error).message);
+      return fail(req, 500, "Signed-in chat is misconfigured on this server", "identity_misconfigured");
+    }
+    let session: Awaited<ReturnType<IdentitySdk["exchangeSession"]>>;
+    try {
+      session = await sdk.exchangeSession({
+        gatewayUrl: o.gatewayUrl!,
+        allowInsecureHttp: idn!.allowInsecureHttp,
+        signer: identitySigner(),
+        subject,
+        agent: identityAgent,
+        ttlSeconds: idn!.sessionTtlSeconds,
+      });
+    } catch (e) {
+      return sdkFail(req, e, "session exchange");
+    }
+    // Same principal, same visitor id: conversations follow the user across devices and page loads.
+    const visitorId = await deriveVisitorId(secret!, `principal:${session.principalId}`);
+    const expiresAt = Math.min(session.expiresAt.getTime(), Date.now() + o.sessionTtlMs);
+    const token = await signVisitorToken(secret!, { v: visitorId, exp: expiresAt, ids: session.sessionToken, ida: identityAgent });
+    const body: SessionResponse = { visitorId, token, expiresAt, verified: true };
+    return json(req, body);
   }
 
   async function pickAgent(requested: string | null | undefined, creds: GatewayCredentials | null, isByo: boolean): Promise<string | null> {
@@ -180,6 +376,12 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       maxMessageLength: o.maxMessageLength,
       version: VERSION,
     };
+    if (idn) {
+      // Identity sessions are bound to one agent, so the widget must not switch.
+      body.defaultAgent = identityAgent;
+      body.allowAgentSwitch = false;
+      body.identity = true;
+    }
     return json(req, body);
   }
 
@@ -192,16 +394,39 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
         return fail(req, 403, "Verification failed", "turnstile_failed");
       }
     }
+    if (idn) {
+      // Fail closed: a signed-in user gets an identity session or no session at all. Only a visitor
+      // who is not signed in (or whose login could not be read) falls back to anonymous, and only
+      // when identity is not required.
+      let user: AuthenticatedUser | null = null;
+      try {
+        user = await idn.authenticate(req);
+      } catch (e) {
+        console.warn("[dewee-webchat] identity.authenticate failed:", e);
+        if (idn.required) return identityFail(req, "SOURCE_UNAVAILABLE", { action: "retry_later", audience: "end_user" });
+      }
+      if (user != null) {
+        if (typeof user !== "object" || typeof user.subject !== "string" || user.subject.trim() === "") {
+          console.error("[dewee-webchat] identity.authenticate must return { subject } or null");
+          return fail(req, 500, "Signed-in chat is misconfigured on this server", "identity_misconfigured");
+        }
+        return issueIdentitySession(req, user.subject);
+      }
+      if (idn.required) return identityFail(req, "IDENTITY_REQUIRED");
+    }
     // Refresh an existing visitor instead of minting a new identity, so history survives.
+    // A signed-in user's token never seeds an anonymous visitor.
     const previous = typeof body?.token === "string" ? await verifyVisitorToken(secret!, body.token) : null;
-    const visitorId = previous?.v ?? randomId(16);
+    const visitorId = (previous && !previous.ids ? previous.v : undefined) ?? randomId(16);
     const expiresAt = Date.now() + o.sessionTtlMs;
     return json(req, { visitorId, token: await signVisitorToken(secret!, { v: visitorId, exp: expiresAt }), expiresAt });
   }
 
   async function handleChat(req: Request): Promise<Response> {
-    const visitorId = await visitorFrom(req);
-    if (!visitorId) return fail(req, 401, "Missing or expired visitor session", "unauthorized");
+    const claims = await visitorFrom(req);
+    if (!claims) return fail(req, 401, "Missing or expired visitor session", "unauthorized");
+    if (idn?.required && !claims.ids) return identityFail(req, "IDENTITY_REQUIRED");
+    const visitorId = claims.v;
     if (limiter && !(await limiter(`${visitorId}|${clientIp(req)}`, "chat"))) return fail(req, 429, "Too many messages, please wait a moment", "rate_limited");
     const { creds, byo: isByo, error } = resolveCreds(req);
     if (error) return fail(req, 400, error, "bad_credentials");
@@ -212,7 +437,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     if (!message) return fail(req, 400, "Message is required");
     if (message.length > o.maxMessageLength) return fail(req, 413, `Message exceeds ${o.maxMessageLength} characters`, "too_long");
     const conversationId = typeof body?.conversationId === "string" && ID_RE.test(body.conversationId) ? body.conversationId : randomId(9);
-    const agent = await pickAgent(body?.agent, creds, isByo);
+    const agent = await agentFor(claims, body?.agent, creds, isByo);
     if (!agent) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
 
     // Page actions: the manifest (no handlers) and page context become a delimited block in front of the
@@ -230,6 +455,17 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       throw e;
     }
 
+    // A signed-in user's session is checked before streaming starts, so an expired or revoked
+    // session answers with a typed HTTP error the widget can act on (re-request /session).
+    let connection: GatewayConnection | undefined;
+    if (claims.ids) {
+      try {
+        connection = await GatewayConnection.connect(creds, { identitySession: claims.ids });
+      } catch (e) {
+        return gatewayFail(req, e);
+      }
+    }
+
     const sessionKey = buildSessionKey(agent, `webchat-${visitorId}-${conversationId}`);
     const abort = new AbortController();
     req.signal?.addEventListener("abort", () => abort.abort(), { once: true });
@@ -245,7 +481,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       let errMsg: string | undefined;
       try {
         await send(actionsHash ? { type: "start", conversationId, agent, actionsHash } : { type: "start", conversationId, agent });
-        for await (const ev of streamChat({ creds, userId: o.userIdPrefix + visitorId, agent, sessionKey, message: pageBlock + message, signal: abort.signal, timeoutMs: o.timeoutMs })) {
+        const who = connection ? { connection } : { userId: o.userIdPrefix + visitorId };
+        for await (const ev of streamChat({ creds, ...who, agent, sessionKey, message: pageBlock + message, signal: abort.signal, timeoutMs: o.timeoutMs })) {
           if (ev.type === "start") continue; // already announced with the conversation id
           if (ev.type === "done") reply = ev.content;
           if (ev.type === "error") errMsg = ev.message;
@@ -256,6 +493,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
         errMsg = (e as Error).message;
         await send({ type: "error", message: errMsg, code: "gateway_error" });
       } finally {
+        connection?.close(); // idempotent; covers a turn that ended before the stream took the connection
         clearInterval(keepAlive);
         try { o.onChat?.({ visitorId, agent, message, reply, error: errMsg }); } catch { /* observer errors are ignored */ }
         writer.close().catch(() => {});
@@ -273,23 +511,55 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
   }
 
   async function handleHistory(req: Request): Promise<Response> {
-    const visitorId = await visitorFrom(req);
-    if (!visitorId) return fail(req, 401, "Missing or expired visitor session", "unauthorized");
+    const claims = await visitorFrom(req);
+    if (!claims) return fail(req, 401, "Missing or expired visitor session", "unauthorized");
+    if (idn?.required && !claims.ids) return identityFail(req, "IDENTITY_REQUIRED");
+    const visitorId = claims.v;
     const { creds, byo: isByo, error } = resolveCreds(req);
     if (error) return fail(req, 400, error, "bad_credentials");
     if (!creds) return fail(req, 500, "Gateway is not configured", "not_configured");
     const url = new URL(req.url);
     const conversationId = url.searchParams.get("conversationId") || "";
     if (!ID_RE.test(conversationId)) return fail(req, 400, "Invalid conversationId");
-    const agent = await pickAgent(url.searchParams.get("agent"), creds, isByo);
+    const agent = await agentFor(claims, url.searchParams.get("agent"), creds, isByo);
     if (!agent) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
     try {
-      const messages = await fetchHistory(creds, o.userIdPrefix + visitorId, agent, buildSessionKey(agent, `webchat-${visitorId}-${conversationId}`));
+      const messages = await fetchHistory(creds, actorOf(claims), agent, buildSessionKey(agent, `webchat-${visitorId}-${conversationId}`));
       return json(req, { messages });
     } catch (e) {
       // A conversation that has not sent its first message yet does not exist on the gateway.
       if ((e as GatewayError).code === "NOT_FOUND") return json(req, { messages: [] });
-      return fail(req, 502, (e as Error).message, "gateway_error");
+      return gatewayFail(req, e);
+    }
+  }
+
+  /** Web-first linking: starts a Dewee link for the signed-in user and returns the proof code. */
+  async function handleLink(req: Request): Promise<Response> {
+    if (limiter && !(await limiter(clientIp(req), "session"))) return fail(req, 429, "Too many requests, slow down", "rate_limited");
+    const claims = await visitorFrom(req);
+    if (!claims?.ids) return identityFail(req, "IDENTITY_REQUIRED");
+    const body: any = await req.json().catch(() => ({}));
+    const idempotencyKey = body?.idempotencyKey;
+    if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !IDEMPOTENCY_KEY_RE.test(idempotencyKey))) {
+      return fail(req, 400, "idempotencyKey must be 1 to 255 printable ASCII characters without spaces");
+    }
+    let sdk: IdentitySdk;
+    try {
+      sdk = await loadIdentitySdk();
+    } catch (e) {
+      console.error("[dewee-webchat]", (e as Error).message);
+      return fail(req, 500, "Signed-in chat is misconfigured on this server", "identity_misconfigured");
+    }
+    try {
+      const link = await sdk.startLink({ gatewayUrl: o.gatewayUrl!, allowInsecureHttp: idn!.allowInsecureHttp, sessionToken: claims.ids, idempotencyKey });
+      const res: LinkResponse = {
+        proofCode: link.proofCode,
+        expiresAt: link.expiresAt.getTime(),
+        deepLinks: link.deepLinks.map((t) => ({ channelType: t.channelType, channelInstanceId: t.channelInstanceId, name: t.name, ...(t.displayName ? { displayName: t.displayName } : {}) })),
+      };
+      return json(req, res);
+    } catch (e) {
+      return sdkFail(req, e, "link start");
     }
   }
 
@@ -302,6 +572,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       if (req.method === "POST" && action === "session") return await handleSession(req);
       if (req.method === "POST" && action === "chat") return await handleChat(req);
       if (req.method === "GET" && action === "history") return await handleHistory(req);
+      if (req.method === "POST" && action === "link" && idn) return await handleLink(req);
       return fail(req, 404, "Not found", "not_found");
     } catch (e) {
       return fail(req, 500, (e as Error).message || "Internal error", "internal");

@@ -1,7 +1,7 @@
 // Minimal Dewee gateway WebSocket RPC client (protocol v3).
 // Runs on Cloudflare Workers (fetch upgrade) and on any runtime with a global WebSocket
 // (Node >= 22, Bun, Deno, Workers with the WebSocket constructor).
-import type { AgentInfo, ChatStreamEvent, HistoryMessage, ToolCallView } from "../protocol";
+import type { AgentInfo, ChatStreamEvent, HistoryMessage, Remediation, ToolCallView } from "../protocol";
 import { stripPageBlock } from "../actions/page-block";
 
 export interface GatewayCredentials {
@@ -13,12 +13,18 @@ export interface GatewayCredentials {
   tenantId?: string;
 }
 
+/**
+ * Who a connection acts as: a gateway user id chosen by this server (anonymous visitors), or a Dewee
+ * identity session, in which case the gateway derives the user and no `user_id` is sent.
+ */
+export type GatewayActor = string | { identitySession: string };
+
 interface Frame {
   type: "res" | "event";
   id?: string;
   ok?: boolean;
   payload?: any;
-  error?: { code?: string; message?: string };
+  error?: { code?: string; message?: string; details?: { remediation?: unknown } };
   event?: string;
 }
 
@@ -29,9 +35,15 @@ type SocketLike = {
 };
 
 export class GatewayError extends Error {
-  constructor(message: string, public code?: string) {
+  constructor(message: string, public code?: string, public remediation?: Remediation) {
     super(message);
   }
+}
+
+function parseRemediation(raw: unknown): Remediation | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const { action, audience } = raw as Record<string, unknown>;
+  return typeof action === "string" && typeof audience === "string" ? { action, audience } : undefined;
 }
 
 function wsUrl(base: string): string {
@@ -75,9 +87,10 @@ export class GatewayConnection {
     ws.addEventListener("error", () => this.fail(new GatewayError("Gateway connection error", "socket_error")));
   }
 
-  static async connect(creds: GatewayCredentials, userId: string, timeoutMs = 15000): Promise<GatewayConnection> {
+  static async connect(creds: GatewayCredentials, actor: GatewayActor, timeoutMs = 15000): Promise<GatewayConnection> {
     const conn = new GatewayConnection(await openSocket(creds.url, timeoutMs));
-    const params: Record<string, string> = { token: creds.token, user_id: userId };
+    const params: Record<string, string> =
+      typeof actor === "string" ? { token: creds.token, user_id: actor } : { token: creds.token, identity_session: actor.identitySession };
     if (creds.tenantId) params.tenant_id = creds.tenantId;
     try {
       await conn.call("connect", params, timeoutMs);
@@ -121,7 +134,7 @@ export class GatewayConnection {
       const p = this.pending.get(frame.id)!;
       this.pending.delete(frame.id);
       if (frame.ok) p.resolve(frame.payload);
-      else p.reject(new GatewayError(frame.error?.message || "Gateway request failed", frame.error?.code));
+      else p.reject(new GatewayError(frame.error?.message || "Gateway request failed", frame.error?.code, parseRemediation(frame.error?.details?.remediation)));
     } else if (frame.type === "event" && frame.event) {
       for (const cb of this.listeners) cb(frame.event, frame.payload);
     }
@@ -140,7 +153,12 @@ export function buildSessionKey(agent: string, conversationId: string): string {
 
 export interface StreamChatOptions {
   creds: GatewayCredentials;
-  userId: string;
+  /** Gateway user id (anonymous visitors). Ignored when `identitySession` or `connection` is set. */
+  userId?: string;
+  /** Dewee identity session: the gateway derives the user; no `user_id` is sent. */
+  identitySession?: string;
+  /** An already connected connection to use (and close) instead of opening one. */
+  connection?: GatewayConnection;
   agent: string;
   sessionKey: string;
   message: string;
@@ -148,9 +166,15 @@ export interface StreamChatOptions {
   timeoutMs?: number;
 }
 
+function actorOf(opts: { userId?: string; identitySession?: string }): GatewayActor {
+  if (opts.identitySession) return { identitySession: opts.identitySession };
+  if (opts.userId) return opts.userId;
+  throw new GatewayError("A user id or an identity session is required", "invalid_actor");
+}
+
 /** Runs one chat turn and yields normalized stream events until the run ends. */
 export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatStreamEvent> {
-  const conn = await GatewayConnection.connect(opts.creds, opts.userId);
+  const conn = opts.connection ?? (await GatewayConnection.connect(opts.creds, actorOf(opts)));
   const queue: ChatStreamEvent[] = [];
   let wake: (() => void) | null = null;
   let finished = false;
@@ -182,7 +206,10 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatS
   conn
     .call("chat.send", { agentId: opts.agent, sessionKey: opts.sessionKey, message: opts.message, stream: true }, opts.timeoutMs ?? 180000)
     .then((res) => { push({ type: "done", content: res?.content ?? "", usage: res?.usage }); end(); })
-    .catch((err: GatewayError) => { if (!finished) push({ type: "error", message: err.message, code: err.code }); end(); });
+    .catch((err: GatewayError) => {
+      if (!finished) push(err.remediation ? { type: "error", message: err.message, code: err.code, remediation: err.remediation } : { type: "error", message: err.message, code: err.code });
+      end();
+    });
 
   try {
     while (true) {
@@ -205,8 +232,8 @@ function clip(v: unknown, max = 4000): string | undefined {
 }
 
 /** Fetches a session transcript and folds tool calls/results into assistant turns. */
-export async function fetchHistory(creds: GatewayCredentials, userId: string, agent: string, sessionKey: string): Promise<HistoryMessage[]> {
-  const conn = await GatewayConnection.connect(creds, userId);
+export async function fetchHistory(creds: GatewayCredentials, actor: GatewayActor, agent: string, sessionKey: string): Promise<HistoryMessage[]> {
+  const conn = await GatewayConnection.connect(creds, actor);
   try {
     const res = await conn.call<{ messages?: any[] }>("chat.history", { agentId: agent, sessionKey }, 15000);
     return foldHistory(res?.messages ?? []);

@@ -1,3 +1,5 @@
+import type { IdentityErrorCode } from "../protocol";
+
 export interface Strings {
   title: string;
   greeting: string;
@@ -26,6 +28,12 @@ export interface Strings {
   allow: string;
   deny: string;
   actionLimit: (n: number) => string;
+  /** Shown for the typed identity errors of a signed-in chat. */
+  identityErrors: Record<IdentityErrorCode, string>;
+  linkIntro: string;
+  linkContinueOn: (channel: string) => string;
+  linkExpires: (minutes: number) => string;
+  linkNoTargets: string;
 }
 
 const en: Strings = {
@@ -56,6 +64,19 @@ const en: Strings = {
   allow: "Allow",
   deny: "Deny",
   actionLimit: (n) => `Stopped after ${n} automatic action rounds. Send a message to continue.`,
+  identityErrors: {
+    IDENTITY_REQUIRED: "Please sign in to chat.",
+    IDENTITY_LINK_REQUIRED: "Link your chat account to continue.",
+    IDENTITY_CONFLICT: "This chat account is already linked to another user. Unlink it there first.",
+    LINK_EXPIRED: "Your session expired. Send your message again.",
+    LINK_REVOKED: "Your access has ended. Sign in again to continue.",
+    PERMISSION_DENIED: "You don't have access to this.",
+    SOURCE_UNAVAILABLE: "We couldn't check your sign-in right now. Please try again shortly.",
+  },
+  linkIntro: "Send this code in a direct message from the chat account you want to link:",
+  linkContinueOn: (channel) => `Continue on ${channel}`,
+  linkExpires: (m) => `The code expires in ${m} min.`,
+  linkNoTargets: "No chat app is set up for linking yet.",
 };
 
 const vi: Strings = {
@@ -86,6 +107,19 @@ const vi: Strings = {
   allow: "Cho phép",
   deny: "Từ chối",
   actionLimit: (n) => `Đã dừng sau ${n} lượt thao tác tự động. Gửi tin nhắn để tiếp tục.`,
+  identityErrors: {
+    IDENTITY_REQUIRED: "Bạn đăng nhập để trò chuyện nhé.",
+    IDENTITY_LINK_REQUIRED: "Bạn cần liên kết tài khoản chat để tiếp tục.",
+    IDENTITY_CONFLICT: "Tài khoản chat này đã liên kết với người dùng khác. Hãy hủy liên kết ở đó trước.",
+    LINK_EXPIRED: "Phiên đăng nhập đã hết hạn. Bạn gửi lại tin nhắn giúp mình nhé.",
+    LINK_REVOKED: "Quyền truy cập của bạn đã kết thúc. Hãy đăng nhập lại để tiếp tục.",
+    PERMISSION_DENIED: "Bạn không có quyền thực hiện việc này.",
+    SOURCE_UNAVAILABLE: "Hiện chưa kiểm tra được đăng nhập của bạn. Bạn thử lại sau ít phút nhé.",
+  },
+  linkIntro: "Gửi mã này trong tin nhắn riêng từ tài khoản chat bạn muốn liên kết:",
+  linkContinueOn: (channel) => `Tiếp tục trên ${channel}`,
+  linkExpires: (m) => `Mã hết hạn sau ${m} phút.`,
+  linkNoTargets: "Chưa có ứng dụng chat nào được thiết lập để liên kết.",
 };
 
 export const locales: Record<string, Strings> = { en, vi };

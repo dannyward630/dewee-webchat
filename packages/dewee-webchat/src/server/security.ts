@@ -24,11 +24,19 @@ function hmacKey(secret: string): Promise<CryptoKey> {
 }
 
 export interface VisitorClaims {
-  /** Visitor id (random, 22 chars). */
+  /** Visitor id (random, 22 chars; derived from the principal for a signed-in user). */
   v: string;
   /** Expiry, epoch ms. */
   exp: number;
+  /** Signed-in users only: the Dewee identity session token (one agent, chat only, short-lived). */
+  ids?: string;
+  /** Signed-in users only: the agent the identity session is bound to. */
+  ida?: string;
 }
+
+/** Longest identity session token the gateway issues (matches the `@dewee/identity` limit). */
+const MAX_IDENTITY_SESSION_LENGTH = 512;
+const AGENT_CLAIM_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 export async function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
   const body = b64url(enc.encode(JSON.stringify(claims)));
@@ -45,10 +53,24 @@ export async function verifyVisitorToken(secret: string, token: string): Promise
     const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims;
     if (typeof claims.v !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(claims.v)) return null;
     if (typeof claims.exp !== "number" || claims.exp < Date.now()) return null;
+    // An identity claim is all or nothing: a session token always travels with the agent it is bound to.
+    if (claims.ids !== undefined || claims.ida !== undefined) {
+      if (typeof claims.ids !== "string" || claims.ids === "" || claims.ids.length > MAX_IDENTITY_SESSION_LENGTH) return null;
+      if (typeof claims.ida !== "string" || !AGENT_CLAIM_RE.test(claims.ida)) return null;
+    }
     return claims;
   } catch {
     return null;
   }
+}
+
+/**
+ * Stable visitor id for a label (e.g. a Dewee principal id): HMAC(secret, label), 22 base64url chars.
+ * A signed-in user keeps the same conversations on every device and page load without the id being guessable.
+ */
+export async function deriveVisitorId(secret: string, label: string): Promise<string> {
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(`dewee-webchat:visitor:${label}`)));
+  return b64url(mac.slice(0, 16));
 }
 
 export function randomId(bytes = 16): string {
