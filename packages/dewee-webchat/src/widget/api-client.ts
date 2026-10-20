@@ -13,8 +13,9 @@ import {
 
 /** Identity errors after which the signed-in session is dropped and `/session` is requested again. */
 const RENEW_CODES = new Set(["LINK_EXPIRED", "LINK_REVOKED"]);
-/** Refresh margins: anonymous visitor tokens live 30 days, identity sessions minutes to hours. */
+/** Refresh margin of anonymous visitor tokens (they live 30 days). */
 const ANON_REFRESH_MS = 86_400_000;
+/** Signed-in sessions live minutes to hours: refresh this long before expiry, at most half the lifetime. */
 const VERIFIED_REFRESH_MS = 60_000;
 
 export interface ApiClientOptions {
@@ -82,8 +83,23 @@ export class ApiClient {
     return this.config;
   }
 
+  /** When each signed-in session should be refreshed, on this browser's clock. */
+  private refreshAt = new WeakMap<SessionResponse, number>();
+
   private fresh(s: SessionResponse): boolean {
-    return s.expiresAt - Date.now() > (s.verified ? VERIFIED_REFRESH_MS : ANON_REFRESH_MS);
+    if (s.verified) return Date.now() < (this.refreshAt.get(s) ?? 0);
+    return s.expiresAt - Date.now() > ANON_REFRESH_MS;
+  }
+
+  /**
+   * A signed-in session is refreshed `min(60s, lifetime/2)` before it ends, with the lifetime the
+   * backend reports (`expiresIn`) counted from receipt, so a short lifetime is not refreshed on every
+   * request and a skewed browser clock does not matter.
+   */
+  private scheduleRefresh(s: SessionResponse): void {
+    const now = Date.now();
+    const life = typeof s.expiresIn === "number" && s.expiresIn > 0 ? s.expiresIn : s.expiresAt - now;
+    this.refreshAt.set(s, now + life - Math.min(VERIFIED_REFRESH_MS, life / 2));
   }
 
   /** The stored anonymous visitor session, if any. Signed-in sessions are never stored. */
@@ -132,7 +148,8 @@ export class ApiClient {
     this.session = s;
     // A signed-in session stays in memory only: the next page load asks the backend again, so a
     // sign-out or a different user never inherits it.
-    if (!s.verified) store.set(this.storageKey, JSON.stringify(s));
+    if (s.verified) this.scheduleRefresh(s);
+    else store.set(this.storageKey, JSON.stringify(s));
     return s;
   }
 
@@ -157,15 +174,27 @@ export class ApiClient {
 
   /** Starts a web-first link of a chat account for the signed-in user (identity backends only). */
   async link(): Promise<LinkResponse> {
-    await this.ensureSession();
-    const res = await fetch(this.url("link"), { method: "POST", headers: this.headers(true), body: "{}" });
+    const res = await this.signedInRequest(() => fetch(this.url("link"), { method: "POST", headers: this.headers(true), body: "{}" }));
     return this.parse<LinkResponse>(res);
   }
 
   async history(agent: string, conversationId: string): Promise<HistoryMessage[]> {
-    await this.ensureSession();
-    const res = await fetch(this.url("history", { agent, conversationId }), { headers: this.headers(true) });
+    const res = await this.signedInRequest(() => fetch(this.url("history", { agent, conversationId }), { headers: this.headers(true) }));
     return (await this.parse<{ messages: HistoryMessage[] }>(res)).messages;
+  }
+
+  /**
+   * Sends a request with the current session. A signed-in session the backend refuses (expired,
+   * revoked, or another user signed in) is dropped and renewed once, as chat() does. An anonymous
+   * visitor's 401 is final, and its stored visitor is kept.
+   */
+  private async signedInRequest(send: () => Promise<Response>): Promise<Response> {
+    await this.ensureSession();
+    const res = await send();
+    if (res.status !== 401 || !this.session?.verified) return res;
+    this.forgetSession();
+    await this.ensureSession();
+    return send();
   }
 
   /** Sends a message and calls `onEvent` for every streamed event. Resolves when the run ends. */

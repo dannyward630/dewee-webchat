@@ -1,5 +1,5 @@
 // <dewee-chat> — framework-agnostic chat widget (Shadow DOM, zero dependencies).
-import { isIdentityErrorCode, type ActionSensitivity, type AgentInfo, type ChatRequestBody, type ChatStreamEvent, type HistoryMessage, type LinkResponse, type PublicConfig, type ToolCallView } from "../protocol";
+import { isIdentityErrorCode, isLinkErrorCode, type ActionSensitivity, type AgentInfo, type ChatRequestBody, type ChatStreamEvent, type HistoryMessage, type LinkResponse, type PublicConfig, type ToolCallView } from "../protocol";
 import { ActionRegistry, runActionCall, type ActionCallStatus, type ActionConfirmHook, type PageAction, type PageActionInfo } from "../actions/action-runner";
 import {
   formatActionResults,
@@ -967,7 +967,8 @@ export class DeweeChatElement extends ElementBase {
   private showError(m: ViewMessage | null, err: Error) {
     const code = (err as ApiError).code;
     // Identity errors get the widget's own localized copy; the server text is only a fallback.
-    const text = (isIdentityErrorCode(code) ? this.strings.identityErrors[code] : "") || err.message || this.strings.errorGeneric;
+    const localized = isIdentityErrorCode(code) ? this.strings.identityErrors[code] : isLinkErrorCode(code) ? this.strings.linkErrors[code] : "";
+    const text = localized || err.message || this.strings.errorGeneric;
     const remediation = (err as ApiError).remediation;
     this.emit("dewee:error", remediation ? { message: text, code, remediation } : { message: text, code });
     if (m) {

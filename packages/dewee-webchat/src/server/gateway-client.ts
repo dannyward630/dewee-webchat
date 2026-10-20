@@ -46,6 +46,11 @@ function parseRemediation(raw: unknown): Remediation | undefined {
   return typeof action === "string" && typeof audience === "string" ? { action, audience } : undefined;
 }
 
+/** A user the gateway derived from an identity session: `tuc:<principal>`. */
+function isIdentityUser(userId: unknown): boolean {
+  return typeof userId === "string" && userId.startsWith("tuc:") && userId.length > 4;
+}
+
 function wsUrl(base: string): string {
   const u = new URL(base);
   u.protocol = u.protocol === "http:" ? "ws:" : "wss:";
@@ -93,7 +98,12 @@ export class GatewayConnection {
       typeof actor === "string" ? { token: creds.token, user_id: actor } : { token: creds.token, identity_session: actor.identitySession };
     if (creds.tenantId) params.tenant_id = creds.tenantId;
     try {
-      await conn.call("connect", params, timeoutMs);
+      const res = await conn.call<{ user_id?: unknown } | undefined>("connect", params, timeoutMs);
+      // Fail closed: a gateway that did not apply the identity session (identity switched off, or a
+      // replica that failed to start it) would otherwise run the turn as the operator token's own user.
+      if (typeof actor !== "string" && !isIdentityUser(res?.user_id)) {
+        throw new GatewayError("Gateway did not apply the identity session", "SOURCE_UNAVAILABLE", { action: "retry_later", audience: "operator" });
+      }
     } catch (e) {
       conn.close();
       throw e;

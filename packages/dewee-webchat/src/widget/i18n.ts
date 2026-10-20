@@ -1,4 +1,4 @@
-import type { IdentityErrorCode } from "../protocol";
+import type { IdentityErrorCode, LinkErrorCode } from "../protocol";
 
 export interface Strings {
   title: string;
@@ -30,6 +30,8 @@ export interface Strings {
   actionLimit: (n: number) => string;
   /** Shown for the typed identity errors of a signed-in chat. */
   identityErrors: Record<IdentityErrorCode, string>;
+  /** Shown when starting a link fails for a reason other than an identity error. */
+  linkErrors: Record<LinkErrorCode, string>;
   linkIntro: string;
   linkContinueOn: (channel: string) => string;
   linkExpires: (minutes: number) => string;
@@ -73,6 +75,11 @@ const en: Strings = {
     PERMISSION_DENIED: "You don't have access to this.",
     SOURCE_UNAVAILABLE: "We couldn't check your sign-in right now. Please try again shortly.",
   },
+  linkErrors: {
+    idempotency_key_reused: "This link request was already used. Please try again.",
+    link_in_progress: "A link is already in progress. Use the code you got, or wait for it to expire.",
+    linking_unavailable: "Linking is not available right now. Please try again later.",
+  },
   linkIntro: "Send this code in a direct message from the chat account you want to link:",
   linkContinueOn: (channel) => `Continue on ${channel}`,
   linkExpires: (m) => `The code expires in ${m} min.`,
@@ -115,6 +122,11 @@ const vi: Strings = {
     LINK_REVOKED: "Quyền truy cập của bạn đã kết thúc. Hãy đăng nhập lại để tiếp tục.",
     PERMISSION_DENIED: "Bạn không có quyền thực hiện việc này.",
     SOURCE_UNAVAILABLE: "Hiện chưa kiểm tra được đăng nhập của bạn. Bạn thử lại sau ít phút nhé.",
+  },
+  linkErrors: {
+    idempotency_key_reused: "Yêu cầu liên kết này đã được dùng. Bạn thử lại nhé.",
+    link_in_progress: "Đang có một liên kết chưa hoàn tất. Hãy dùng mã đã nhận hoặc chờ mã hết hạn.",
+    linking_unavailable: "Hiện chưa thể liên kết. Bạn thử lại sau nhé.",
   },
   linkIntro: "Gửi mã này trong tin nhắn riêng từ tài khoản chat bạn muốn liên kết:",
   linkContinueOn: (channel) => `Tiếp tục trên ${channel}`,
