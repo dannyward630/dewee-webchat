@@ -12,7 +12,7 @@ import {
   type ParsedCall,
 } from "../actions/directives";
 import { ACTION_LIMITS, stripPageBlock } from "../actions/page-block";
-import { ApiClient, ApiError } from "./api-client";
+import { ApiClient, ApiError, type RequestHeadersOption } from "./api-client";
 import { showConfirmDialog } from "./confirm-dialog";
 import { icons, pickStrings, type Strings } from "./i18n";
 import { renderMarkdown } from "./markdown";
@@ -67,6 +67,13 @@ export interface DeweeChatConfig {
   maxActionRounds?: number;
   /** Per-handler timeout. Default 30000 ms. */
   actionTimeoutMs?: number;
+  /**
+   * Extra headers for every request to `endpoint` (e.g. a CSRF token). A function is called before
+   * each request. Cannot override content-type, authorization or the gateway credential headers.
+   */
+  headers?: RequestHeadersOption;
+  /** Replaces `globalThis.fetch` for every widget request (e.g. to add credentials or tracing). */
+  fetch?: typeof fetch;
 }
 
 /** A page action call as shown in the transcript. */
@@ -93,7 +100,7 @@ export interface ActionEventDetail {
 }
 
 /** Option keys that hold functions/objects: applied without re-rendering the widget. */
-type BehaviorKey = "actions" | "confirm" | "getPageContext";
+type BehaviorKey = "actions" | "confirm" | "getPageContext" | "headers" | "fetch";
 
 interface ViewRefs {
   root: HTMLElement;
@@ -168,7 +175,7 @@ export class DeweeChatElement extends ElementBase {
   private mql: MediaQueryList | null = null;
   private registry = new ActionRegistry();
   private propActionNames = new Set<string>();
-  private hooks: { confirm?: ActionConfirmHook; getPageContext?: () => unknown } = {};
+  private hooks: Pick<DeweeChatConfig, "confirm" | "getPageContext" | "headers" | "fetch"> = {};
   private acks = new Map<string, string>();
   private els!: {
     launcher: HTMLButtonElement; panel: HTMLElement; log: HTMLElement; title: HTMLElement; subtitle: HTMLElement;
@@ -199,11 +206,13 @@ export class DeweeChatElement extends ElementBase {
 
   /** Updates configuration at runtime (wins over attributes). */
   configure(partial: Partial<DeweeChatConfig>): void {
-    const { actions, confirm, getPageContext, ...rest } = partial;
+    const { actions, confirm, getPageContext, headers, fetch, ...rest } = partial;
     const has = (k: BehaviorKey) => Object.prototype.hasOwnProperty.call(partial, k);
     if (has("actions")) this.setPropActions(actions ?? []);
     if (has("confirm")) this.hooks.confirm = confirm;
     if (has("getPageContext")) this.hooks.getPageContext = getPageContext;
+    if (has("headers")) this.hooks.headers = headers;
+    if (has("fetch")) this.hooks.fetch = fetch;
     if (!Object.keys(rest).length) return;
     this.overrides = { ...this.overrides, ...rest };
     if (this.els) this.applyConfig(); // otherwise applied on connect
@@ -219,6 +228,14 @@ export class DeweeChatElement extends ElementBase {
     this.propActionNames.delete(name);
     return this.registry.unregister(name);
   }
+
+  /** Extra request headers (property only; same as `configure({ headers })`). */
+  get headers(): RequestHeadersOption | undefined { return this.hooks.headers; }
+  set headers(v: RequestHeadersOption | undefined) { this.hooks.headers = v; }
+
+  /** Custom fetch for widget requests (property only; same as `configure({ fetch })`). */
+  get fetch(): typeof fetch | undefined { return this.hooks.fetch; }
+  set fetch(v: typeof fetch | undefined) { this.hooks.fetch = v; }
 
   /** Names of the currently registered page actions. */
   get actionNames(): string[] {
@@ -458,6 +475,12 @@ export class DeweeChatElement extends ElementBase {
         gatewayUrl: c.gatewayUrl,
         gatewayToken: c.gatewayToken,
         turnstile: (siteKey) => this.challenge(siteKey),
+        // Read the current hooks on every request so configure({ headers, fetch }) applies at once.
+        headers: () => {
+          const h = this.hooks.headers;
+          return (typeof h === "function" ? h() : h) ?? {};
+        },
+        fetch: (input, init) => (this.hooks.fetch ?? globalThis.fetch)(input, init),
       });
     }
     return this.api;
