@@ -127,11 +127,34 @@ Attributes use kebab-case (`show-reasoning="false"`), `data-*` on the script tag
 | `actions`, `confirm`, `getPageContext` | | [Page actions](#agent-page-actions) (JS/props only) |
 | `maxActionRounds` | `5` | Automatic action turns per visitor message |
 | `actionTimeoutMs` | `30000` | Per-handler timeout |
+| `headers` | | Extra request headers, object or `() => object \| Promise<object>` called before every request (JS/props only) |
+| `fetch` | `globalThis.fetch` | Custom fetch for every widget request (JS/props only) |
 
 Methods: `open()`, `close()`, `toggle()`, `send(text)`, `stop()`, `newConversation()`, `configure(partial)`,
 `registerActions(actions)`, `unregisterAction(name)`.
 Events: `dewee:ready`, `dewee:open`, `dewee:close`, `dewee:send`, `dewee:reply`, `dewee:error`, `dewee:action`.
 CSS variables: `--dw-accent`, `--dw-font`, `--dw-radius`, `--dw-width`, `--dw-height`, `--dw-z`.
+
+## Custom headers and fetch
+
+Behind a same-origin BFF that wants a CSRF header, cookies or tracing:
+
+```tsx
+<DeweeChat
+  endpoint="/dashboard/api/v1/dewee"
+  headers={() => ({ "x-csrf-token": readCsrfToken() })} // evaluated before every request
+  fetch={(input, init) => fetch(input, { ...init, credentials: "include" })}
+/>
+```
+
+Vanilla: `chat.configure({ headers, fetch })` or the `chat.headers` / `chat.fetch` properties. `headers` applies to
+every request to `endpoint` (config, session, history, chat). It cannot override `content-type`, `authorization`,
+`x-dewee-gateway-url` or `x-dewee-gateway-token` (case-insensitive; such keys are dropped). Header names are sent
+lower-cased. For a cross-origin `endpoint`, the backend's CORS preflight must allow the extra headers; the built-in
+handlers only allow their own.
+
+Visitor sessions are reused until less than 10% of the token lifetime remains (at most 24 h, at least 30 s), so
+backends with short session TTLs do not mint a new session on every request.
 
 ## Agent page actions
 

@@ -126,6 +126,17 @@ Headers: `Authorization: Bearer <visitor token>`. Returns the visitor's own conv
 ] }
 ```
 
+## Extra request headers
+
+Hosts may configure the widget to add headers (for example `x-csrf-token`) to every request, and to use a
+custom `fetch`. The widget always sets `content-type`, `authorization` and the gateway credential headers
+itself; host headers with those names are dropped. A cross-origin backend must list any extra header in
+`Access-Control-Allow-Headers`.
+
+The widget refreshes its visitor session (`POST /session` with the old `token`) once less than 10% of the
+lifetime it observed (`expiresAt` minus the time the session was issued), capped at 24 h and floored at 30 s,
+remains.
+
 ## Bring-your-own credentials (optional)
 
 When the backend enables it, the widget may send `x-dewee-gateway-url` and `x-dewee-gateway-token`
