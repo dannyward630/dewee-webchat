@@ -3,7 +3,11 @@ import { DeweeChatElement, type DeweeChatConfig } from "./widget/element";
 export { DeweeChatElement, type DeweeChatConfig };
 export { ApiClient, ApiError, type ApiClientOptions } from "./widget/api-client";
 export { renderMarkdown } from "./widget/markdown";
-export type { AgentInfo, ChatStreamEvent, HistoryMessage, PublicConfig, SessionResponse, ToolCallView } from "./protocol";
+export type { ActionManifestEntry, ActionSensitivity, AgentInfo, ChatRequestBody, ChatStreamEvent, HistoryMessage, PublicConfig, SessionResponse, ToolCallView } from "./protocol";
+export type { ActionCallStatus, ActionConfirmHook, PageAction, PageActionContext, PageActionInfo } from "./actions/action-runner";
+export type { ActionResult, ActionResultStatus } from "./actions/directives";
+export type { JsonSchema } from "./actions/json-schema-subset";
+export type { ActionEventDetail, ActionCallView } from "./widget/element";
 
 /** Registers the `<dewee-chat>` custom element (idempotent, SSR-safe). */
 export function defineDeweeChat(tag = "dewee-chat"): void {

@@ -1,10 +1,19 @@
-import { useRef, useState } from "react";
-import { DeweeChat, type DeweeChatElement } from "dewee-webchat/react";
+import { useMemo, useRef, useState } from "react";
+import { DeweeChat, type DeweeChatElement, type PageAction } from "dewee-webchat/react";
 
 type Theme = "light" | "dark" | "auto";
+type View = "overview" | "runs" | "settings";
+interface Run { id: string; name: string; status: "running" | "cancelled" | "done" }
+
+const VIEWS: View[] = ["overview", "runs", "settings"];
+const INITIAL_RUNS: Run[] = [
+  { id: "run_a1", name: "Nightly build", status: "running" },
+  { id: "run_b2", name: "Docs deploy", status: "running" },
+  { id: "run_c3", name: "Data export", status: "done" },
+];
 
 const SAMPLE_QUESTION = "Đọc https://dewee.sh và tóm tắt 1 câu.";
-const SUGGESTIONS = ["What is Dewee?", "How do I add this chat to my React app?", SAMPLE_QUESTION];
+const SUGGESTIONS = ["What is Dewee?", "Show me the runs page", "Cancel the nightly build", SAMPLE_QUESTION];
 const REPO_URL = "https://github.com/nextlevelbuilder/dewee-webchat/tree/main/examples/react-vite";
 
 const SNIPPET = `// worker/index.ts — the gateway token never leaves the Worker
@@ -34,6 +43,39 @@ export function App() {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [theme, setTheme] = useState<Theme>("auto");
   const [status, setStatus] = useState("none yet (the widget loads when first opened)");
+  const [view, setView] = useState<View>("overview");
+  const [runs, setRuns] = useState<Run[]>(INITIAL_RUNS);
+
+  // Page actions the agent may call from chat. Navigation is an allowlist (enum), and the mutate
+  // action only runs after the visitor approves it in the widget's confirm dialog.
+  const actions = useMemo<PageAction[]>(
+    () => [
+      {
+        name: "navigate",
+        description: "Switch the demo dashboard to another view.",
+        sensitivity: "navigate",
+        parameters: { type: "object", properties: { view: { type: "string", enum: VIEWS } }, required: ["view"], additionalProperties: false },
+        handler: ({ view }: { view: View }) => {
+          setView(view);
+          return { view };
+        },
+      },
+      {
+        name: "runs.cancel",
+        description: "Cancel a running job on the demo dashboard by its id (see page context).",
+        sensitivity: "mutate",
+        parameters: { type: "object", properties: { id: { type: "string", pattern: "^run_[a-z0-9]+$" } }, required: ["id"], additionalProperties: false },
+        handler: ({ id }: { id: string }) => {
+          const run = runs.find((r) => r.id === id);
+          if (!run) throw new Error(`No run ${id}`);
+          if (run.status !== "running") return { id, status: run.status, changed: false };
+          setRuns((all) => all.map((r) => (r.id === id ? { ...r, status: "cancelled" } : r)));
+          return { id, status: "cancelled", changed: true };
+        },
+      },
+    ],
+    [runs],
+  );
 
   return (
     <main>
@@ -86,6 +128,30 @@ export function App() {
         Last event: <code>{status}</code>
       </p>
 
+      <h2>Page actions</h2>
+      <p>
+        The agent can operate this demo dashboard: try “Show me the runs page” or “Cancel the nightly build”. Navigation
+        runs directly; cancelling asks you first.
+      </p>
+      <div className="buttons" role="tablist">
+        {VIEWS.map((v) => (
+          <button key={v} type="button" role="tab" aria-selected={view === v} className={view === v ? "primary" : ""} onClick={() => setView(v)}>
+            {v}
+          </button>
+        ))}
+      </div>
+      {view === "runs" ? (
+        <ul className="runs">
+          {runs.map((r) => (
+            <li key={r.id}>
+              <code>{r.id}</code> {r.name} — <strong>{r.status}</strong>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="status">Current view: {view}</p>
+      )}
+
       <h2>Integration</h2>
       <pre>
         <code>{SNIPPET}</code>
@@ -107,6 +173,9 @@ export function App() {
         theme={theme}
         showReasoning={showReasoning}
         showToolCalls={showToolCalls}
+        actions={actions}
+        getPageContext={() => ({ view, runs })}
+        onAction={(e) => setStatus(`action ${e.detail.phase}: ${e.detail.name}${e.detail.status ? ` (${e.detail.status})` : ""}`)}
         onReady={() => setStatus("ready")}
         onOpen={() => setStatus("open")}
         onClose={() => setStatus("close")}

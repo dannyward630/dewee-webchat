@@ -1,6 +1,19 @@
 // <dewee-chat> — framework-agnostic chat widget (Shadow DOM, zero dependencies).
-import type { AgentInfo, ChatStreamEvent, HistoryMessage, PublicConfig, ToolCallView } from "../protocol";
+import type { ActionSensitivity, AgentInfo, ChatRequestBody, ChatStreamEvent, HistoryMessage, PublicConfig, ToolCallView } from "../protocol";
+import { ActionRegistry, runActionCall, type ActionCallStatus, type ActionConfirmHook, type PageAction, type PageActionInfo } from "../actions/action-runner";
+import {
+  formatActionResults,
+  isActionResultMessage,
+  parseActionResults,
+  parseDirectives,
+  stripDirectives,
+  type ActionResult,
+  type ActionResultStatus,
+  type ParsedCall,
+} from "../actions/directives";
+import { ACTION_LIMITS, stripPageBlock } from "../actions/page-block";
 import { ApiClient, ApiError } from "./api-client";
+import { showConfirmDialog } from "./confirm-dialog";
 import { icons, pickStrings, type Strings } from "./i18n";
 import { renderMarkdown } from "./markdown";
 import { styles } from "./styles";
@@ -44,7 +57,43 @@ export interface DeweeChatConfig {
   width?: string;
   height?: string;
   zIndex?: number;
+  /** Page actions the agent may invoke. Replaces the set previously passed through this option. */
+  actions?: PageAction[];
+  /** Approval for `mutate`/`destructive` actions. Default: the built-in confirm dialog. Only `true` approves. */
+  confirm?: ActionConfirmHook;
+  /** Small, host-redacted snapshot of page state sent with every message (max 4 KB as JSON). */
+  getPageContext?: () => unknown;
+  /** Automatic action rounds allowed per visitor message. Default 5. */
+  maxActionRounds?: number;
+  /** Per-handler timeout. Default 30000 ms. */
+  actionTimeoutMs?: number;
 }
+
+/** A page action call as shown in the transcript. */
+export interface ActionCallView {
+  id: string;
+  name: string;
+  args?: Record<string, unknown>;
+  status: ActionCallStatus;
+  error?: string;
+}
+
+/** `detail` of the `dewee:action` event (host telemetry). */
+export interface ActionEventDetail {
+  phase: "start" | "result";
+  id: string;
+  name: string;
+  sensitivity?: ActionSensitivity;
+  args?: Record<string, unknown>;
+  status?: ActionResultStatus;
+  result?: unknown;
+  error?: string;
+  agent: string;
+  conversationId: string;
+}
+
+/** Option keys that hold functions/objects: applied without re-rendering the widget. */
+type BehaviorKey = "actions" | "confirm" | "getPageContext";
 
 interface ViewRefs {
   root: HTMLElement;
@@ -52,6 +101,7 @@ interface ViewRefs {
   md: HTMLElement;
   thinking?: HTMLDetailsElement;
   tools: Map<string, HTMLDetailsElement>;
+  actions: HTMLElement;
 }
 
 interface ViewMessage extends HistoryMessage {
@@ -59,6 +109,12 @@ interface ViewMessage extends HistoryMessage {
   startedAt?: number;
   thinkingMs?: number;
   view?: ViewRefs;
+  /** Automatic action-result follow-up: kept in the transcript model, not shown. */
+  hidden?: boolean;
+  /** The visitor pressed Stop: never execute directives from a cut-off answer. */
+  stopped?: boolean;
+  actionsHash?: string;
+  actions?: ActionCallView[];
 }
 
 const BOOL_ATTRS = ["show-reasoning", "show-tool-calls", "allow-agent-switch", "open", "persist", "hide-branding", "launcher-avatar"];
@@ -110,6 +166,10 @@ export class DeweeChatElement extends ElementBase {
   private activated = false;
   private strings: Strings = pickStrings();
   private mql: MediaQueryList | null = null;
+  private registry = new ActionRegistry();
+  private propActionNames = new Set<string>();
+  private hooks: { confirm?: ActionConfirmHook; getPageContext?: () => unknown } = {};
+  private acks = new Map<string, string>();
   private els!: {
     launcher: HTMLButtonElement; panel: HTMLElement; log: HTMLElement; title: HTMLElement; subtitle: HTMLElement;
     status: HTMLElement; avatar: HTMLElement; select: HTMLSelectElement; input: HTMLTextAreaElement; send: HTMLButtonElement;
@@ -134,13 +194,42 @@ export class DeweeChatElement extends ElementBase {
       else if (a === "z-index") c.zIndex = Number(v);
       else c[camel(a)] = v;
     }
-    return { ...c, ...this.overrides } as DeweeChatConfig;
+    return { ...c, ...this.overrides, ...this.hooks } as DeweeChatConfig;
   }
 
   /** Updates configuration at runtime (wins over attributes). */
   configure(partial: Partial<DeweeChatConfig>): void {
-    this.overrides = { ...this.overrides, ...partial };
+    const { actions, confirm, getPageContext, ...rest } = partial;
+    const has = (k: BehaviorKey) => Object.prototype.hasOwnProperty.call(partial, k);
+    if (has("actions")) this.setPropActions(actions ?? []);
+    if (has("confirm")) this.hooks.confirm = confirm;
+    if (has("getPageContext")) this.hooks.getPageContext = getPageContext;
+    if (!Object.keys(rest).length) return;
+    this.overrides = { ...this.overrides, ...rest };
     if (this.els) this.applyConfig(); // otherwise applied on connect
+  }
+
+  /** Adds or replaces page actions the agent may invoke. Throws TypeError on an invalid definition. */
+  registerActions(actions: PageAction | PageAction[]): void {
+    this.registry.register(actions);
+  }
+
+  /** Removes a page action. Returns false when it was not registered. */
+  unregisterAction(name: string): boolean {
+    this.propActionNames.delete(name);
+    return this.registry.unregister(name);
+  }
+
+  /** Names of the currently registered page actions. */
+  get actionNames(): string[] {
+    return this.registry.names();
+  }
+
+  private setPropActions(actions: PageAction[]) {
+    const next = new Set(actions.map((a) => a.name));
+    for (const name of this.propActionNames) if (!next.has(name)) this.registry.unregister(name);
+    if (actions.length) this.registry.register(actions);
+    this.propActionNames = next;
   }
 
   open(): void {
@@ -172,21 +261,43 @@ export class DeweeChatElement extends ElementBase {
     await this.activate();
     this.els.input.value = "";
     this.autosize();
-    this.pushMessage({ role: "user", content: message });
+    // Agent turn, then (when the answer calls page actions) run them and send the results back,
+    // at most `maxActionRounds` times per visitor message.
+    let next: { message: string; hidden: boolean } | null = { message, hidden: false };
+    for (let round = 0; next; round++) {
+      const reply = await this.runTurn(next.message, next.hidden);
+      next = null;
+      if (reply.status !== "done" || reply.stopped || !this.registry.size) break;
+      const { calls } = parseDirectives(reply.content);
+      if (!calls.length) break;
+      reply.actions = calls.map((c) => ({ id: c.id, name: c.name, args: c.ok ? c.args : undefined, status: "pending" as const }));
+      const limit = this.config.maxActionRounds ?? 5;
+      if (round >= limit) {
+        for (const a of reply.actions) Object.assign(a, { status: "error", error: "Automatic action limit reached" });
+        this.updateMessage(reply);
+        this.showNotice(this.strings.actionLimit(limit));
+        break;
+      }
+      this.updateMessage(reply);
+      const results = await this.runActions(reply, calls);
+      if (results) next = { message: formatActionResults(results, this.server?.maxMessageLength ?? 4000), hidden: true };
+    }
+  }
+
+  /** One request/response with the agent. */
+  private async runTurn(message: string, hidden: boolean): Promise<ViewMessage> {
+    this.pushMessage({ role: "user", content: message, hidden });
     const reply: ViewMessage = { role: "assistant", content: "", status: "streaming", startedAt: Date.now() };
     this.pushMessage(reply);
     this.setRunning(new AbortController());
-    this.emit("dewee:send", { message, agent: this.agentId, conversationId: this.conversationId });
+    this.emit("dewee:send", { message, agent: this.agentId, conversationId: this.conversationId, auto: hidden || undefined });
     try {
-      await this.client().chat(
-        { message, agent: this.agentId, conversationId: this.conversationId },
-        (e) => this.onStreamEvent(reply, e),
-        this.running!.signal,
-      );
+      await this.client().chat(this.chatBody(message), (e) => this.onStreamEvent(reply, e), this.running!.signal);
       if (reply.status === "streaming") reply.status = "done";
     } catch (e) {
       if ((e as Error).name === "AbortError") {
         reply.status = "done";
+        reply.stopped = true;
         if (!reply.content) reply.content = `_${this.strings.stopped}_`;
       } else {
         reply.status = "error";
@@ -197,10 +308,103 @@ export class DeweeChatElement extends ElementBase {
       this.updateMessage(reply);
       this.setRunning(null);
       if (reply.status === "done") {
+        if (reply.actionsHash && !reply.stopped) this.setAck(reply.actionsHash);
         this.emit("dewee:reply", { content: reply.content, agent: this.agentId, conversationId: this.conversationId });
         if (this.config.mode !== "inline" && !this.hasAttribute("data-open")) this.setAttribute("data-unread", "");
       }
     }
+    return reply;
+  }
+
+  private chatBody(message: string): ChatRequestBody & { agent: string; conversationId: string } {
+    const body: ChatRequestBody & { agent: string; conversationId: string } = { message, agent: this.agentId, conversationId: this.conversationId };
+    if (this.registry.size) {
+      body.actions = this.registry.manifest();
+      const ack = this.getAck();
+      if (ack) body.actionsHash = ack;
+    }
+    const ctx = this.pageContext();
+    if (ctx !== undefined) body.pageContext = ctx;
+    return body;
+  }
+
+  /** Host snapshot, dropped (with a warning) when it fails or exceeds the backend cap. */
+  private pageContext(): unknown {
+    const get = this.hooks.getPageContext;
+    if (!get) return undefined;
+    try {
+      const v = get();
+      if (v === undefined || v === null) return undefined;
+      const size = new TextEncoder().encode(JSON.stringify(v)).length;
+      if (size <= ACTION_LIMITS.maxPageContextBytes) return v;
+      console.warn(`[dewee-webchat] getPageContext() returned ${size} bytes; the limit is ${ACTION_LIMITS.maxPageContextBytes}. Context not sent.`);
+      return { truncated: true };
+    } catch (e) {
+      console.warn("[dewee-webchat] getPageContext() failed:", e);
+      return undefined;
+    }
+  }
+
+  private ackKey() {
+    return `dewee-webchat:actions:${this.config.endpoint}:${this.agentId}:${this.conversationId}`;
+  }
+
+  private getAck(): string | undefined {
+    return this.acks.get(this.ackKey()) ?? (this.config.persist !== false ? store.get(this.ackKey()) ?? undefined : undefined);
+  }
+
+  private setAck(hash: string) {
+    this.acks.set(this.ackKey(), hash);
+    if (this.config.persist !== false) store.set(this.ackKey(), hash);
+  }
+
+  /** Executes the calls of one answer in order. Resolves null when the visitor stopped the chain. */
+  private async runActions(reply: ViewMessage, calls: ParsedCall[]): Promise<ActionResult[] | null> {
+    const ctrl = new AbortController();
+    this.setRunning(ctrl);
+    const results: ActionResult[] = [];
+    const base = { agent: this.agentId, conversationId: this.conversationId };
+    try {
+      for (const [i, call] of calls.entries()) {
+        const view = reply.actions![i];
+        const sensitivity = call.ok ? this.registry.get(call.name)?.sensitivity : undefined;
+        const args = call.ok ? call.args : undefined;
+        this.emit("dewee:action", { phase: "start", id: call.id, name: call.name, sensitivity, args, ...base } satisfies ActionEventDetail);
+        const r = await runActionCall(call, {
+          registry: this.registry,
+          confirm: (action, a) => this.confirmAction(action, a, ctrl.signal),
+          signal: ctrl.signal,
+          timeoutMs: this.config.actionTimeoutMs,
+          ...base,
+          onStatus: (status) => {
+            view.status = status;
+            this.updateMessage(reply);
+          },
+        });
+        if (r.error) view.error = r.error;
+        this.updateMessage(reply);
+        results.push(r);
+        this.emit("dewee:action", { phase: "result", id: r.id, name: r.name, sensitivity, args, status: r.status, result: r.result, error: r.error, ...base } satisfies ActionEventDetail);
+      }
+    } finally {
+      this.setRunning(null);
+    }
+    return ctrl.signal.aborted ? null : results;
+  }
+
+  private confirmAction(action: PageActionInfo & { callId: string }, args: Record<string, unknown>, signal: AbortSignal): Promise<boolean> | boolean {
+    if (this.hooks.confirm) return this.hooks.confirm(action, args);
+    if (this.config.mode !== "inline" && !this.hasAttribute("data-open")) this.open();
+    return showConfirmDialog(this.els.panel, this.strings, action, args, signal);
+  }
+
+  private showNotice(text: string) {
+    const div = document.createElement("div");
+    div.className = "notice";
+    div.setAttribute("role", "status");
+    div.textContent = text;
+    this.els.log.appendChild(div);
+    this.scrollToBottom(true);
   }
 
   /** Stops the running reply. */
@@ -452,7 +656,7 @@ export class DeweeChatElement extends ElementBase {
     if (!saved) return;
     try {
       const history = await this.client().history(this.agentId, this.conversationId);
-      this.messages = history.map((m) => ({ ...m, status: "done" as const }));
+      this.messages = decorateHistory(history.map((m) => ({ ...m, status: "done" as const })));
       this.renderLog();
     } catch {
       /* history is a nicety: a fresh conversation still works */
@@ -503,6 +707,7 @@ export class DeweeChatElement extends ElementBase {
   private renderMessage(m: ViewMessage): HTMLElement {
     const root = document.createElement("div");
     root.className = `msg ${m.role}${m.status === "error" ? " error" : ""}`;
+    root.hidden = !!m.hidden;
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     root.appendChild(bubble);
@@ -510,9 +715,13 @@ export class DeweeChatElement extends ElementBase {
     trace.className = "trace";
     const md = document.createElement("div");
     md.className = m.role === "assistant" ? "md" : "";
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    actions.hidden = true;
     if (m.role === "assistant") bubble.appendChild(trace);
     bubble.appendChild(md);
-    m.view = { root, trace, md, tools: new Map() };
+    if (m.role === "assistant") bubble.appendChild(actions);
+    m.view = { root, trace, md, tools: new Map(), actions };
     this.updateMessage(m);
     return root;
   }
@@ -555,14 +764,35 @@ export class DeweeChatElement extends ElementBase {
     }
     v.trace.hidden = !v.trace.childElementCount;
 
-    // content
-    const typing = m.status === "streaming" && !m.content;
+    // content (page action directives are hidden; their calls render as chips below)
+    const shown = this.registry.size || m.actions ? stripDirectives(m.content) : m.content;
+    const typing = m.status === "streaming" && !shown;
+    v.md.hidden = !typing && !shown && !!m.actions?.length;
     if (typing) {
       v.md.innerHTML = `<span class="typing" aria-label="${this.strings.thinking}"><i></i><i></i><i></i></span>`;
     } else {
-      v.md.replaceChildren(renderMarkdown(document, m.content));
+      v.md.replaceChildren(renderMarkdown(document, shown));
       v.md.classList.toggle("cursor", m.status === "streaming");
     }
+    this.renderActions(v, m.actions ?? []);
+  }
+
+  private renderActions(v: ViewRefs, list: ActionCallView[]) {
+    v.actions.hidden = !list.length;
+    v.actions.replaceChildren(
+      ...list.map((a) => {
+        const chip = document.createElement("div");
+        chip.className = "action";
+        chip.dataset.status = a.status;
+        const busy = a.status === "running" || a.status === "awaiting-confirmation";
+        chip.innerHTML = `${busy ? '<span class="spin"></span>' : icons.action}<span class="action-name"></span><span class="action-state"></span>`;
+        chip.querySelector(".action-name")!.textContent = a.name || "?";
+        chip.querySelector(".action-state")!.textContent = this.strings.actionStatus[a.status];
+        const tip = [a.args && Object.keys(a.args).length ? JSON.stringify(a.args) : "", a.error ?? ""].filter(Boolean).join("\n");
+        if (tip) chip.title = tip;
+        return chip;
+      }),
+    );
   }
 
   private renderTool(v: ViewRefs, t: ToolCallView) {
@@ -599,6 +829,7 @@ export class DeweeChatElement extends ElementBase {
   private onStreamEvent(m: ViewMessage, e: ChatStreamEvent) {
     switch (e.type) {
       case "start":
+        if (e.actionsHash) m.actionsHash = e.actionsHash;
         if (e.conversationId && e.conversationId !== this.conversationId) {
           this.conversationId = e.conversationId;
           if (this.config.persist !== false) store.set(this.convKey(), e.conversationId);
@@ -699,6 +930,29 @@ export class DeweeChatElement extends ElementBase {
       holder.remove();
     }
   }
+}
+
+/** Hides automatic action-result messages and restores action chips when loading history. */
+function decorateHistory(messages: ViewMessage[]): ViewMessage[] {
+  messages.forEach((m, i) => {
+    if (m.role === "user") {
+      m.content = stripPageBlock(m.content);
+      if (isActionResultMessage(m.content)) m.hidden = true;
+      return;
+    }
+    if (!m.content.includes("```dewee-action")) return;
+    const { calls } = parseDirectives(m.content);
+    if (!calls.length) return;
+    const next = messages[i + 1];
+    const nextContent = next?.role === "user" ? stripPageBlock(next.content) : "";
+    const results = isActionResultMessage(nextContent) ? parseActionResults(nextContent) : [];
+    m.actions = calls.map((c) => {
+      const r = results.find((x) => x.id === c.id);
+      const status: ActionCallStatus = !r ? "error" : r.status === "ok" ? "done" : r.status;
+      return { id: c.id, name: c.name, args: c.ok ? c.args : undefined, status, error: r ? r.error : "Not run" };
+    });
+  });
+  return messages;
 }
 
 function safeJson<T>(s: string, fallback: T): T {

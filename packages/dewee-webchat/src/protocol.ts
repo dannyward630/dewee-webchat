@@ -3,7 +3,7 @@
 
 /** Server-Sent Events emitted by `POST {basePath}/chat`. */
 export type ChatStreamEvent =
-  | { type: "start"; runId?: string; conversationId: string; agent: string }
+  | { type: "start"; runId?: string; conversationId: string; agent: string; actionsHash?: string }
   | { type: "thinking"; text: string }
   | { type: "delta"; text: string }
   | { type: "tool_call"; id: string; name: string; arguments?: unknown }
@@ -51,6 +51,29 @@ export interface HistoryMessage {
   thinking?: string;
   toolCalls?: ToolCallView[];
   createdAt?: string;
+}
+
+/** How much an agent-invoked page action can change. `mutate`/`destructive` always need user approval. */
+export type ActionSensitivity = "read" | "navigate" | "mutate" | "destructive";
+
+/** What the backend (and the agent) learns about a page action. Handlers never leave the browser. */
+export interface ActionManifestEntry {
+  name: string;
+  description: string;
+  /** JSON Schema subset describing `args` (object). */
+  parameters: Record<string, unknown>;
+  sensitivity: ActionSensitivity;
+}
+
+/** Body of `POST {basePath}/chat`. `actions`/`actionsHash`/`pageContext` are optional (page actions). */
+export interface ChatRequestBody {
+  message: string;
+  agent?: string;
+  conversationId?: string;
+  actions?: ActionManifestEntry[];
+  /** Hash from the `start` event of the last completed turn; the manifest is re-sent to the agent only when it differs. */
+  actionsHash?: string;
+  pageContext?: unknown;
 }
 
 export const HEADER_GATEWAY_URL = "x-dewee-gateway-url";

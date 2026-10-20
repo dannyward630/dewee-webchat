@@ -85,3 +85,4 @@ pre {
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
 footer { margin-top: 48px; font-size: 13px; color: var(--muted); }
+.runs { margin: 12px 0 0; padding-left: 20px; font-size: 14px; line-height: 1.8; }

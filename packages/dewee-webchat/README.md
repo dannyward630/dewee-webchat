@@ -124,10 +124,76 @@ Attributes use kebab-case (`show-reasoning="false"`), `data-*` on the script tag
 | `allowAgentSwitch` | `true` | Agent picker when the backend allows several |
 | `persist` | `true` | Keep the conversation across page loads |
 | `open`, `hideBranding`, `width`, `height`, `zIndex` | | |
+| `actions`, `confirm`, `getPageContext` | | [Page actions](#agent-page-actions) (JS/props only) |
+| `maxActionRounds` | `5` | Automatic action turns per visitor message |
+| `actionTimeoutMs` | `30000` | Per-handler timeout |
 
-Methods: `open()`, `close()`, `toggle()`, `send(text)`, `stop()`, `newConversation()`, `configure(partial)`.
-Events: `dewee:ready`, `dewee:open`, `dewee:close`, `dewee:send`, `dewee:reply`, `dewee:error`.
+Methods: `open()`, `close()`, `toggle()`, `send(text)`, `stop()`, `newConversation()`, `configure(partial)`,
+`registerActions(actions)`, `unregisterAction(name)`.
+Events: `dewee:ready`, `dewee:open`, `dewee:close`, `dewee:send`, `dewee:reply`, `dewee:error`, `dewee:action`.
 CSS variables: `--dw-accent`, `--dw-font`, `--dw-radius`, `--dw-width`, `--dw-height`, `--dw-z`.
+
+## Agent page actions
+
+Let the agent operate the page the visitor is on: navigate, filter a table, cancel a job. The page
+registers typed actions; the agent calls them from chat; the widget validates, asks for approval when
+needed, runs the handler and sends the result back to the agent. No gateway changes are needed.
+
+```tsx
+import { DeweeChat, type PageAction } from "dewee-webchat/react";
+
+const actions: PageAction[] = [
+  {
+    name: "navigate",
+    description: "Open a dashboard page.",
+    sensitivity: "navigate",
+    parameters: { type: "object", properties: { route: { type: "string", enum: ["/", "/runs", "/settings"] } }, required: ["route"] },
+    handler: ({ route }) => { router.push(route); return { route }; },
+  },
+  {
+    name: "runs.cancel",
+    description: "Cancel a running job by id.",
+    sensitivity: "mutate", // asks the visitor before running
+    parameters: { type: "object", properties: { id: { type: "string", pattern: "^run_[a-z0-9]+$" } }, required: ["id"], additionalProperties: false },
+    handler: async ({ id }, { signal }) => (await fetch(`/api/runs/${id}/cancel`, { method: "POST", signal })).json(),
+  },
+];
+
+<DeweeChat endpoint="/api/dewee" actions={actions} getPageContext={() => ({ route: location.pathname })} onAction={(e) => console.log(e.detail)} />;
+```
+
+Vanilla: `chat.registerActions(actions)`, `chat.unregisterAction("navigate")`, or
+`chat.configure({ actions, confirm, getPageContext })`. Vue: `:actions`, `:confirm`, `:get-page-context`, `@action`.
+
+```ts
+interface PageAction<Args = any> {
+  name: string;                    // ^[a-z][a-z0-9_.-]{0,63}$
+  description: string;             // written for the agent, ≤ 1000 chars
+  parameters?: JsonSchema;         // object schema; subset: type, properties, required, additionalProperties,
+                                   // enum, const, min/maxLength, pattern, minimum/maximum, items, min/maxItems
+  sensitivity: "read" | "navigate" | "mutate" | "destructive";
+  handler(args: Args, ctx: { callId: string; conversationId: string; agent: string; signal: AbortSignal }): unknown | Promise<unknown>;
+}
+type ActionConfirmHook = (action: PageActionInfo & { callId: string }, args: Record<string, unknown>) => boolean | Promise<boolean>;
+```
+
+- `mutate` and `destructive` actions run only after approval: the built-in accessible dialog, or your
+  `confirm(action, args)` hook — only a resolved `true` approves. A denial is reported to the agent as
+  `status: "denied"`.
+- Each call shows a status chip (pending, awaiting confirmation, running, done, denied, error). Stop
+  cancels running handlers (`ctx.signal`).
+- `getPageContext()` returns a small snapshot (≤ 4 KB as JSON) sent with every message. Redact it yourself.
+- `dewee:action` fires with `{ phase: "start" | "result", id, name, sensitivity, args, status, result, error, agent, conversationId }`.
+- The manifest is sent only when it changes (hash acknowledged per conversation).
+- The wire format is in [docs/http-contract.md](https://github.com/nextlevelbuilder/dewee-webchat/blob/main/docs/http-contract.md#page-actions).
+
+**Security.** Agent output is untrusted. Treat every action as an API the visitor could call with
+arbitrary arguments: register only what the visitor may already do, keep the server as the authority
+(auth, CSRF, permissions), constrain args with `enum`/`pattern`/`additionalProperties: false`, and use
+an allowlist for navigation (never `location.href = args.url`). The widget never evaluates agent output
+or inserts it as HTML, caps calls per answer and automatic turns per message, and never runs a
+`mutate`/`destructive` handler without approval. Page context and results are labelled as data for the
+agent, but prompt injection through page content is still possible — do not put secrets in either.
 
 ## Security model
 

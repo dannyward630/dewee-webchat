@@ -31,6 +31,7 @@ export const styles = /* css */ `
 }
 * { box-sizing: border-box; }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+[hidden] { display: none !important; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 /* ---------- launcher ---------- */
@@ -195,6 +196,46 @@ details > summary svg.ic { width: 14px; height: 14px; flex: none; }
 .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--dw-muted); opacity: .4; animation: bounce 1.2s infinite; }
 .typing i:nth-child(2) { animation-delay: .15s; } .typing i:nth-child(3) { animation-delay: .3s; }
 @keyframes bounce { 0%, 60%, 100% { transform: none; opacity: .35; } 30% { transform: translateY(-4px); opacity: 1; } }
+
+/* page actions */
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.md[hidden] + .actions { margin-top: 0; }
+.action {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 9px 4px 8px; border-radius: 999px;
+  border: 1px solid var(--dw-border); background: var(--dw-surface); font-size: 12px; color: var(--dw-muted);
+}
+.action svg.ic { width: 13px; height: 13px; flex: none; color: var(--dw-accent); }
+.action-name { font-family: var(--dw-mono); font-size: 11.5px; color: var(--dw-fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.action-state { font-size: 11px; flex: none; }
+.action[data-status="done"] .action-state { color: #13a06f; }
+.action[data-status="awaiting-confirmation"] { border-color: color-mix(in srgb, #d98a00 45%, transparent); }
+.action[data-status="awaiting-confirmation"] .action-state { color: #b06f00; }
+.action[data-status="denied"] .action-state, .action[data-status="error"] .action-state { color: #c2334f; }
+.notice { margin: -6px 0 16px; font-size: 12px; color: var(--dw-muted); text-align: center; }
+.confirm-backdrop {
+  position: absolute; inset: 0; z-index: 2; display: flex; align-items: flex-end; justify-content: center; padding: 12px;
+  background: color-mix(in srgb, var(--dw-fg) 28%, transparent); animation: rise .18s ease both;
+}
+.confirm {
+  width: 100%; max-height: 100%; overflow: auto; background: var(--dw-bg); color: var(--dw-fg);
+  border: 1px solid var(--dw-border); border-radius: 16px; padding: 16px; box-shadow: var(--dw-shadow);
+}
+.confirm h3 { margin: 0 0 10px; font-size: 15px; font-weight: 650; }
+.confirm-action { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.confirm-action code { font-family: var(--dw-mono); font-size: 12.5px; background: var(--dw-surface); padding: 2px 6px; border-radius: 6px; }
+.sens { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--dw-border); color: var(--dw-muted); }
+.sens[data-level="destructive"] { color: #c2334f; border-color: color-mix(in srgb, #c2334f 40%, transparent); }
+.confirm-text { margin: 8px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--dw-muted); }
+.confirm-warn { margin: 8px 0 0; font-size: 13px; font-weight: 600; color: #c2334f; }
+.confirm-args {
+  margin: 10px 0 0; font-family: var(--dw-mono); font-size: 11.5px; line-height: 1.5; background: var(--dw-surface);
+  border: 1px solid var(--dw-border); border-radius: 8px; padding: 8px; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.confirm-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.btn { font: inherit; font-size: 13.5px; font-weight: 600; padding: 8px 14px; border-radius: 10px; border: 1px solid var(--dw-border); background: var(--dw-bg); color: var(--dw-fg); min-height: 38px; }
+.btn.allow { background: var(--dw-accent); border-color: var(--dw-accent); color: var(--dw-accent-contrast); }
+.btn.allow.danger { background: #c2334f; border-color: #c2334f; color: #fff; }
+.btn:focus-visible { outline: 3px solid color-mix(in srgb, var(--dw-accent) 45%, transparent); outline-offset: 2px; }
 
 /* ---------- composer ---------- */
 .composer { padding: 10px 12px 12px; border-top: 1px solid var(--dw-border); background: var(--dw-bg); }

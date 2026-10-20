@@ -9,6 +9,7 @@ import {
   type ChatStreamEvent,
   type PublicConfig,
 } from "../protocol";
+import { ActionInputError, buildPageBlock, hashManifest, normalizeManifest, serializePageContext } from "../actions/page-block";
 import { buildSessionKey, fetchHistory, listAgents, streamChat, type GatewayCredentials, type GatewayError } from "./gateway-client";
 import {
   memoryRateLimiter,
@@ -214,6 +215,21 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     const agent = await pickAgent(body?.agent, creds, isByo);
     if (!agent) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
 
+    // Page actions: the manifest (no handlers) and page context become a delimited block in front of the
+    // visitor's message. The manifest is repeated only when its hash differs from the one the widget
+    // reports as already delivered in this conversation.
+    let pageBlock = "";
+    let actionsHash: string | undefined;
+    try {
+      const manifest = body?.actions != null ? normalizeManifest(body.actions) : undefined;
+      const pageContext = serializePageContext(body?.pageContext);
+      if (manifest?.length) actionsHash = await hashManifest(manifest);
+      pageBlock = buildPageBlock({ manifest, hash: actionsHash, includeManifest: body?.actionsHash !== actionsHash, pageContext });
+    } catch (e) {
+      if (e instanceof ActionInputError) return fail(req, e.status, e.message, e.code);
+      throw e;
+    }
+
     const sessionKey = buildSessionKey(agent, `webchat-${visitorId}-${conversationId}`);
     const abort = new AbortController();
     req.signal?.addEventListener("abort", () => abort.abort(), { once: true });
@@ -228,8 +244,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       let reply = "";
       let errMsg: string | undefined;
       try {
-        await send({ type: "start", conversationId, agent });
-        for await (const ev of streamChat({ creds, userId: o.userIdPrefix + visitorId, agent, sessionKey, message, signal: abort.signal, timeoutMs: o.timeoutMs })) {
+        await send(actionsHash ? { type: "start", conversationId, agent, actionsHash } : { type: "start", conversationId, agent });
+        for await (const ev of streamChat({ creds, userId: o.userIdPrefix + visitorId, agent, sessionKey, message: pageBlock + message, signal: abort.signal, timeoutMs: o.timeoutMs })) {
           if (ev.type === "start") continue; // already announced with the conversation id
           if (ev.type === "done") reply = ev.content;
           if (ev.type === "error") errMsg = ev.message;

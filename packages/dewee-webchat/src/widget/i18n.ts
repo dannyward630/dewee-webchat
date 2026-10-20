@@ -20,6 +20,12 @@ export interface Strings {
   poweredBy: string;
   errorGeneric: string;
   stopped: string;
+  actionStatus: Record<"pending" | "awaiting-confirmation" | "running" | "done" | "denied" | "error", string>;
+  confirmTitle: string;
+  confirmDestructive: string;
+  allow: string;
+  deny: string;
+  actionLimit: (n: number) => string;
 }
 
 const en: Strings = {
@@ -44,6 +50,12 @@ const en: Strings = {
   poweredBy: "Powered by",
   errorGeneric: "Something went wrong. Please try again.",
   stopped: "Stopped.",
+  actionStatus: { pending: "queued", "awaiting-confirmation": "needs approval", running: "running", done: "done", denied: "declined", error: "failed" },
+  confirmTitle: "Allow this action?",
+  confirmDestructive: "This can't be undone.",
+  allow: "Allow",
+  deny: "Deny",
+  actionLimit: (n) => `Stopped after ${n} automatic action rounds. Send a message to continue.`,
 };
 
 const vi: Strings = {
@@ -68,6 +80,12 @@ const vi: Strings = {
   poweredBy: "Vận hành bởi",
   errorGeneric: "Có lỗi xảy ra. Bạn thử lại giúp mình nhé.",
   stopped: "Đã dừng.",
+  actionStatus: { pending: "chờ", "awaiting-confirmation": "cần xác nhận", running: "đang chạy", done: "xong", denied: "đã từ chối", error: "lỗi" },
+  confirmTitle: "Cho phép thao tác này?",
+  confirmDestructive: "Thao tác này không thể hoàn tác.",
+  allow: "Cho phép",
+  deny: "Từ chối",
+  actionLimit: (n) => `Đã dừng sau ${n} lượt thao tác tự động. Gửi tin nhắn để tiếp tục.`,
 };
 
 export const locales: Record<string, Strings> = { en, vi };
@@ -78,6 +96,7 @@ export function pickStrings(locale?: string): Strings {
 }
 
 export const icons = {
+  action: `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 9-12h-7l1-8Z"/></svg>`,
   chat: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8.5 8.5 0 0 1-12.4 7.6L3 21l1.4-5.1A8.5 8.5 0 1 1 21 12Z"/><path d="M8.5 11h.01M12 11h.01M15.5 11h.01"/></svg>`,
   close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>`,
   down: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`,

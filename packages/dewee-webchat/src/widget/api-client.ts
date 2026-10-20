@@ -2,6 +2,7 @@
 import {
   HEADER_GATEWAY_TOKEN,
   HEADER_GATEWAY_URL,
+  type ChatRequestBody,
   type ChatStreamEvent,
   type HistoryMessage,
   type PublicConfig,
@@ -114,7 +115,7 @@ export class ApiClient {
 
   /** Sends a message and calls `onEvent` for every streamed event. Resolves when the run ends. */
   async chat(
-    input: { message: string; agent: string; conversationId: string },
+    input: ChatRequestBody & { agent: string; conversationId: string },
     onEvent: (e: ChatStreamEvent) => void,
     signal?: AbortSignal,
   ): Promise<void> {

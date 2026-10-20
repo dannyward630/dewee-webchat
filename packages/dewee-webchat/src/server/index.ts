@@ -12,4 +12,5 @@ export {
   type StreamChatOptions,
 } from "./gateway-client";
 export { memoryRateLimiter, signVisitorToken, verifyVisitorToken, type RateLimiter } from "./security";
-export type { AgentInfo, ChatStreamEvent, HistoryMessage, PublicConfig, SessionResponse } from "../protocol";
+export { ACTION_LIMITS, buildPageBlock, hashManifest, normalizeManifest, stripPageBlock } from "../actions/page-block";
+export type { ActionManifestEntry, ActionSensitivity, AgentInfo, ChatRequestBody, ChatStreamEvent, HistoryMessage, PublicConfig, SessionResponse } from "../protocol";
