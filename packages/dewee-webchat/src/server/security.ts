@@ -44,8 +44,14 @@ export interface VisitorClaims {
 
 /** Longest identity session token the gateway issues (matches the `@dewee/identity` limit). */
 const MAX_IDENTITY_SESSION_LENGTH = 512;
-/** Longest sealed form: 12-byte IV + 512 bytes + 16-byte tag, base64url. */
-const MAX_SEALED_LENGTH = Math.ceil(((12 + MAX_IDENTITY_SESSION_LENGTH + 16) * 4) / 3);
+/**
+ * Longest sealed plaintext, `{"t":"<session>","h":"<digest>"}` in UTF-8: the 15 bytes of JSON syntax,
+ * the session at worst 6 bytes per character (a `\u00XX` escape; a non-ASCII character is at most 3
+ * UTF-8 bytes per UTF-16 unit), and the 43-character base64url HMAC-SHA-256 digest.
+ */
+const MAX_SEALED_PLAINTEXT = '{"t":"","h":""}'.length + 6 * MAX_IDENTITY_SESSION_LENGTH + 43;
+/** Longest sealed form: 12-byte IV + plaintext + 16-byte tag, base64url. */
+const MAX_SEALED_LENGTH = Math.ceil(((12 + MAX_SEALED_PLAINTEXT + 16) * 4) / 3);
 const AGENT_CLAIM_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
 const sealKeyCache = new Map<string, Promise<CryptoKey>>();
@@ -104,6 +110,15 @@ export async function subjectDigest(secret: string, subject: string): Promise<st
   return b64url(mac);
 }
 
+/** Compares two strings in time that depends only on their lengths, not on where they differ. */
+export function constantTimeEqual(a: string, b: string): boolean {
+  const x = enc.encode(a);
+  const y = enc.encode(b);
+  let diff = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return diff === 0;
+}
+
 export async function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
   let wire: Omit<VisitorClaims, "sub"> = claims;
   if (claims.ids !== undefined && claims.ida !== undefined) {
@@ -154,18 +169,25 @@ export function randomId(bytes = 16): string {
 
 /**
  * Rate-limit buckets: `session` (new visitor sessions, per IP), `chat` (messages, per visitor and IP),
- * and with signed-in users `verified` (signed-in `/session` calls, per user) and `link` (link starts,
- * per user).
+ * and with signed-in users `preauth` (calls to the host's `authenticate`, per IP), `verified`
+ * (signed-in `/session` calls, per user) and `link` (link starts, per user).
  */
-export type RateLimitBucket = "session" | "chat" | "verified" | "link";
+export type RateLimitBucket = "session" | "chat" | "preauth" | "verified" | "link";
+
+/** Default `preauth` limit: generous, it only caps how hard a client can drive `authenticate`. */
+const DEFAULT_PREAUTH_LIMIT: [number, number] = [120, 60_000];
 
 /** Returns true when the key may proceed. Implementations may be async (KV, DO, Redis…). */
 export type RateLimiter = (key: string, bucket: RateLimitBucket) => boolean | Promise<boolean>;
 
-/** `[max, windowMs]` per bucket. `verified` and `link` fall back to the `session` limit when not set. */
+/**
+ * `[max, windowMs]` per bucket. `preauth` defaults to 120 per minute; `verified` and `link` fall back to
+ * the `session` limit when not set.
+ */
 export interface MemoryRateLimits {
   chat: [number, number];
   session: [number, number];
+  preauth?: [number, number];
   verified?: [number, number];
   link?: [number, number];
 }
@@ -177,7 +199,7 @@ export interface MemoryRateLimits {
 export function memoryRateLimiter(limits: MemoryRateLimits): RateLimiter {
   const windows = new Map<string, { start: number; count: number }>();
   return (key, bucket) => {
-    const [max, windowMs] = limits[bucket] ?? limits.session;
+    const [max, windowMs] = limits[bucket] ?? (bucket === "preauth" ? DEFAULT_PREAUTH_LIMIT : limits.session);
     const id = `${bucket}:${key}`;
     const now = Date.now();
     const w = windows.get(id);

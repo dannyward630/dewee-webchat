@@ -292,10 +292,14 @@ How it behaves:
   visitor is. It refreshes the session `min(60 s, lifetime/2)` before it ends, counting the lifetime
   (`expiresIn`) from when it received it. Call `chat.renewSession()` after a sign-in or sign-out
   without a page load.
-- Rate limits (default, in memory): 30 signed-in `/session` calls per user per 10 minutes, 5 link starts
-  per user per 10 minutes. A visitor who is not signed in and still has a valid anonymous token gets it
-  back as is; only minting a new one counts against the 10 per IP per 10 minutes. A custom `rateLimit`
-  receives the buckets `verified` and `link` besides `session` and `chat`.
+- Rate limits (default, in memory): 120 `authenticate` calls per IP per minute (checked before
+  `authenticate` runs), 30 signed-in `/session` calls per user per 10 minutes, 5 link starts per user per
+  10 minutes. A visitor who is not signed in and still has a valid anonymous token gets it back as is;
+  only minting a new one counts against the 10 per IP per 10 minutes. A custom `rateLimit` receives the
+  buckets `preauth`, `verified` and `link` besides `session` and `chat`.
+- Keep `authenticate` cheap or cached (a signed-cookie check, not a database round trip per call): it
+  runs on every `/session`, so on every page load, and with `rebindEachRequest` on every `/chat`,
+  `/history` and `/link`, with only the generous per-IP cap in front of it.
 
 **Linking a chat app.** A signed-in user can link their Telegram, Discord or other chat account
 without typing any id: call `chat.startLink()`. The widget asks `POST {endpoint}/link`, which starts

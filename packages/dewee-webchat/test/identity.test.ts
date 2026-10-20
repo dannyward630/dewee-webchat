@@ -17,6 +17,7 @@ import {
   type RateLimitBucket,
 } from "../src/server";
 import { deweeIdentitySdk } from "../src/server/identity";
+import { constantTimeEqual } from "../src/server/security";
 import { ApiClient } from "../src/widget/api-client";
 import { pickStrings } from "../src/widget/i18n";
 
@@ -282,6 +283,24 @@ describe("identity sessions: sealed token", () => {
   });
 });
 
+describe("identity sessions: sealed token limits", () => {
+  it("seals and opens a session token of the SDK's 512-character maximum, with a subject digest", async () => {
+    for (const ids of ["a".repeat(512), '"\\'.repeat(256), "\u0001".repeat(512), "é".repeat(512)]) {
+      const token = await signVisitorToken(VISITOR_SECRET, { v: "visitor_max512", exp: Date.now() + 60_000, ids, ida: "support", sub: "d".repeat(43) });
+      expect(await verifyVisitorToken(VISITOR_SECRET, token)).toEqual({ v: "visitor_max512", exp: expect.any(Number), ids, ida: "support", sub: "d".repeat(43) });
+    }
+    const tooLong = await signVisitorToken(VISITOR_SECRET, { v: "visitor_max512", exp: Date.now() + 60_000, ids: "a".repeat(513), ida: "support" });
+    expect(await verifyVisitorToken(VISITOR_SECRET, tooLong)).toBeNull();
+  });
+
+  it("compares strings in constant time without changing the answer", () => {
+    expect(constantTimeEqual("abc", "abc")).toBe(true);
+    expect(constantTimeEqual("abc", "abd")).toBe(false);
+    expect(constantTimeEqual("abc", "abcd")).toBe(false);
+    expect(constantTimeEqual("", "")).toBe(true);
+  });
+});
+
 describe("identity sessions: fail closed", () => {
   it("refuses identity mode combined with client credentials and other misconfiguration", () => {
     const base = { gatewayUrl: "https://gw.example.com", token: GW_TOKEN, secret: VISITOR_SECRET, agents: ["support"] };
@@ -455,17 +474,31 @@ describe("identity sessions: reuse and rate limits", () => {
     const calls: Array<[string, RateLimitBucket]> = [];
     const h = makeHandler({}, { rateLimit: (key, bucket) => (calls.push([key, bucket]), true) });
     const a = (await session(h, "user-a")).json();
-    expect(calls).toEqual([["subject:user-a", "verified"]]);
+    expect(calls).toEqual([["unknown", "preauth"], ["subject:user-a", "verified"]]);
     calls.length = 0;
     expect((await link(h, a.token)).status).toBe(200);
     expect(calls).toEqual([[`visitor:${a.visitorId}`, "link"]]);
     calls.length = 0;
     const anon = (await session(h)).json();
-    expect(calls.map(([, b]) => b)).toEqual(["session"]);
+    expect(calls.map(([, b]) => b)).toEqual(["preauth", "session"]);
     calls.length = 0;
     const again = (await session(h, undefined, { token: anon.token })).json();
     expect(again).toEqual({ visitorId: anon.visitorId, token: anon.token, expiresAt: anon.expiresAt });
-    expect(calls).toEqual([]);
+    expect(calls).toEqual([["unknown", "preauth"]]);
+  });
+
+  it("caps authenticate calls per IP before running it, on /session and on rebinding", async () => {
+    let authCalls = 0;
+    const counted = async (req: Request) => (authCalls++, cookieUser(req));
+    const h = makeHandler({ authenticate: counted, rebindEachRequest: true }, { rateLimit: undefined });
+    const a = (await session(h, "user-a")).json();
+    for (let i = 0; i < 118; i++) await session(h, undefined, { token: "x" });
+    expect((await chat(h, a.token, {}, "uid=user-a")).status).toBe(200); // the 120th call
+    const before = authCalls;
+    const r = await chat(h, a.token, {}, "uid=user-a");
+    expect([r.status, r.json().error.code]).toEqual([429, "rate_limited"]);
+    expect((await session(h, "user-a")).status).toBe(429);
+    expect(authCalls).toBe(before); // refused before authenticate ran
   });
 
   it("answers 429 once a user's signed-in session budget is spent", async () => {

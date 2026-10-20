@@ -169,8 +169,11 @@ again on `/chat`, `/history` and `/link`: a different user or none is `401 IDENT
 asks `/session` again), a failed check `503 SOURCE_UNAVAILABLE`. A widget token replayed under another
 user's cookie is then useless.
 
-**Rate limits** (the Node/Workers defaults): signed-in `/session` 30 per user per 10 minutes, `/link` 5
-per user per 10 minutes, new anonymous sessions 10 per IP per 10 minutes, messages 20 per minute. The IP
+**Rate limits** (the Node/Workers defaults): host login checks 120 per IP per minute (before the check
+runs, on `/session` and on rebinding), signed-in `/session` 30 per user per 10 minutes, `/link` 5 per
+user per 10 minutes, new anonymous sessions 10 per IP per 10 minutes, messages 20 per minute. Every
+limit answers `429 rate_limited`. The host's login check runs on every `/session` (every page load) and,
+with rebinding, on every `/chat`, `/history` and `/link`, so it should be cheap or cached. The IP
 comes from `cf-connecting-ip`, `x-real-ip` or `x-forwarded-for`, which only a proxy in front can vouch
 for (unchanged from before signed-in users).
 

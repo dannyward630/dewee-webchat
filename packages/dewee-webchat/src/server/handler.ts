@@ -32,6 +32,7 @@ import {
   memoryRateLimiter,
   randomId,
   signVisitorToken,
+  constantTimeEqual,
   subjectDigest,
   verifyTurnstile,
   verifyVisitorToken,
@@ -96,7 +97,8 @@ export interface DeweeIdentityOptions {
   /**
    * Reads your own login (cookie, header…). Return null for a visitor who is not signed in. Throwing
    * means the login could not be read: the visitor gets `503 SOURCE_UNAVAILABLE`, never an anonymous
-   * session.
+   * session. Keep it cheap or cached: it runs on every `/session` (every page load) and, with
+   * `rebindEachRequest`, on every `/chat`, `/history` and `/link`, behind a generous per-IP cap only.
    */
   authenticate(req: Request): Promise<AuthenticatedUser | null>;
   /** Dewee application id (`dewee identity setup` prints it). */
@@ -156,8 +158,8 @@ export interface DeweeHandlerOptions {
   turnstile?: { siteKey: string; secretKey: string };
   /**
    * Custom limiter, or false to disable. Default (in memory): 20 messages/min per visitor and IP,
-   * 10 new sessions/10 min per IP and, with `identity`, 30 signed-in sessions/10 min per user and
-   * 5 link starts/10 min per user.
+   * 10 new sessions/10 min per IP and, with `identity`, 120 `authenticate` calls/min per IP,
+   * 30 signed-in sessions/10 min per user and 5 link starts/10 min per user.
    */
   rateLimit?: RateLimiter | false;
   maxMessageLength?: number;
@@ -247,7 +249,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
   const limiter: RateLimiter | null =
     o.rateLimit === false
       ? null
-      : o.rateLimit ?? memoryRateLimiter({ chat: [20, 60_000], session: [10, 600_000], verified: [30, 600_000], link: [5, 600_000] });
+      : o.rateLimit ??
+        memoryRateLimiter({ chat: [20, 60_000], session: [10, 600_000], preauth: [120, 60_000], verified: [30, 600_000], link: [5, 600_000] });
   const staticAgents: AgentInfo[] =
     o.agents === "*" ? [] : (o.agents ?? []).map((a) => (typeof a === "string" ? { id: a } : a));
   const wildcardAgents = o.agents === "*";
@@ -408,6 +411,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
    */
   async function rebindRefusal(req: Request, claims: VisitorClaims): Promise<Response | null> {
     if (!idn?.rebindEachRequest || !claims.ids) return null;
+    const throttled = await preauthRefusal(req);
+    if (throttled) return throttled;
     let user: AuthenticatedUser | null;
     try {
       user = await idn.authenticate(req);
@@ -415,8 +420,15 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       console.warn("[dewee-webchat] identity.authenticate failed:", e);
       return identityFail(req, "SOURCE_UNAVAILABLE", { action: "retry_later", audience: "end_user" });
     }
-    const same = !!user && typeof user.subject === "string" && !!claims.sub && (await subjectDigest(secret!, user.subject)) === claims.sub;
+    const same =
+      !!user && typeof user.subject === "string" && !!claims.sub && constantTimeEqual(await subjectDigest(secret!, user.subject), claims.sub);
     return same ? null : identityFail(req, "IDENTITY_REQUIRED");
+  }
+
+  /** A generous per-IP cap in front of every `authenticate` call, so a client cannot drive the host's login check at will. */
+  async function preauthRefusal(req: Request): Promise<Response | null> {
+    if (!limiter || (await limiter(clientIp(req), "preauth"))) return null;
+    return fail(req, 429, "Too many requests, slow down", "rate_limited");
   }
 
   const actorOf = (claims: VisitorClaims): GatewayActor => (claims.ids ? { identitySession: claims.ids } : o.userIdPrefix + claims.v);
@@ -572,6 +584,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     const body: any = await req.json().catch(() => ({}));
     // Fail closed: a signed-in user gets an identity session or no session at all. A login that could
     // not be read is not "signed out", so it never falls back to anonymous.
+    const throttled = await preauthRefusal(req);
+    if (throttled) return throttled;
     let user: AuthenticatedUser | null;
     try {
       user = await idn!.authenticate(req);
