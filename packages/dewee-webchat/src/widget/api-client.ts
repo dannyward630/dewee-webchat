@@ -88,7 +88,12 @@ export class ApiClient {
       h[HEADER_GATEWAY_URL] = this.o.gatewayUrl;
       h[HEADER_GATEWAY_TOKEN] = this.o.gatewayToken;
     }
-    if (auth && this.session) h.authorization = `Bearer ${this.session.token}`;
+    if (auth) {
+      // Read the token only after the host headers resolved: a renewSession() during that await
+      // clears the session, and the request must carry the renewed one, never none or a stale one.
+      const s = this.session && this.fresh(this.session) ? this.session : await this.ensureSession();
+      h.authorization = `Bearer ${s.token}`;
+    }
     return h;
   }
 

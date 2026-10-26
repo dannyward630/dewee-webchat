@@ -153,7 +153,8 @@ every request to `endpoint` (config, session, history, link, chat). It cannot ov
 `authorization` (which carries the anonymous or signed-in session token), `x-dewee-gateway-url` or
 `x-dewee-gateway-token` (case-insensitive; such keys are dropped). Header names are sent lower-cased. For a
 cross-origin `endpoint`, the backend's CORS preflight must allow the extra headers; the built-in handlers only
-allow their own.
+allow their own. A custom `fetch` receives every request as sent, including the session bearer token of a
+signed-in user, so only the trusted host page should supply it.
 
 Anonymous visitor sessions are reused until less than 10% of the token lifetime remains (at most 24 h, at least
 30 s), so backends with short session TTLs do not mint a new session on every request. Signed-in sessions are kept
