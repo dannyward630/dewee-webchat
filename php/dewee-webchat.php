@@ -31,7 +31,7 @@ final class DeweeActionInputError extends RuntimeException
 
 final class DeweeWebchat
 {
-    public const VERSION = '0.2.0';
+    public const VERSION = '0.4.0';
     public const PAGE_BLOCK_OPEN = '[[dewee-page v1]]';
     public const PAGE_BLOCK_CLOSE = '[[/dewee-page]]';
     /** Mirrors ACTION_LIMITS in src/actions/page-block.ts. */

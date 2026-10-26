@@ -1,7 +1,7 @@
 import { DeweeChatElement, type DeweeChatConfig } from "./widget/element";
 
 export { DeweeChatElement, type DeweeChatConfig };
-export { ApiClient, ApiError, type ApiClientOptions } from "./widget/api-client";
+export { ApiClient, ApiError, RESERVED_HEADERS, type ApiClientOptions, type RequestHeadersOption } from "./widget/api-client";
 export { renderMarkdown } from "./widget/markdown";
 export type { ActionManifestEntry, ActionSensitivity, AgentInfo, ChatRequestBody, ChatStreamEvent, HistoryMessage, IdentityErrorCode, LinkResponse, LinkTarget, PublicConfig, Remediation, SessionResponse, ToolCallView } from "./protocol";
 export type { ActionCallStatus, ActionConfirmHook, PageAction, PageActionContext, PageActionInfo } from "./actions/action-runner";

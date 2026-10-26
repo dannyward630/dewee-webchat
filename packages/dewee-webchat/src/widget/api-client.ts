@@ -13,10 +13,22 @@ import {
 
 /** Identity errors after which the signed-in session is dropped and `/session` is requested again. */
 const RENEW_CODES = new Set(["LINK_EXPIRED", "LINK_REVOKED"]);
-/** Refresh margin of anonymous visitor tokens (they live 30 days). */
-const ANON_REFRESH_MS = 86_400_000;
 /** Signed-in sessions live minutes to hours: refresh this long before expiry, at most half the lifetime. */
 const VERIFIED_REFRESH_MS = 60_000;
+
+/** Extra request headers: a static map, or a function evaluated before every request. */
+export type RequestHeadersOption =
+  | Record<string, string>
+  | (() => Record<string, string> | Promise<Record<string, string>>);
+
+/**
+ * Headers the widget owns; `headers` cannot override them (compared case-insensitively). The
+ * session bearer token, signed-in or anonymous, travels in `authorization`.
+ */
+export const RESERVED_HEADERS: readonly string[] = ["content-type", "authorization", HEADER_GATEWAY_URL, HEADER_GATEWAY_TOKEN];
+
+/** A session as held by the client: `obtainedAt` is the browser time it was received. */
+type HeldSession = SessionResponse & { obtainedAt?: number };
 
 export interface ApiClientOptions {
   /** Backend base URL, e.g. "/api/dewee" or "https://example.com/api/dewee". */
@@ -26,6 +38,10 @@ export interface ApiClientOptions {
   gatewayToken?: string;
   /** Called when the backend requires a Turnstile challenge; must resolve to a token. */
   turnstile?: (siteKey: string) => Promise<string>;
+  /** Extra headers merged into every request (reserved headers excluded). */
+  headers?: RequestHeadersOption;
+  /** Replaces `globalThis.fetch` for every request. */
+  fetch?: typeof fetch;
 }
 
 export class ApiError extends Error {
@@ -41,7 +57,7 @@ const store = {
 };
 
 export class ApiClient {
-  private session: SessionResponse | null = null;
+  private session: HeldSession | null = null;
   private config: PublicConfig | null = null;
   private sessionPromise: Promise<SessionResponse> | null = null;
 
@@ -57,8 +73,17 @@ export class ApiClient {
     return `dewee-webchat:session:${this.o.endpoint}`;
   }
 
-  private headers(auth = false): Record<string, string> {
-    const h: Record<string, string> = { "content-type": "application/json" };
+  private request(url: string, init: RequestInit): Promise<Response> {
+    return (this.o.fetch ?? globalThis.fetch)(url, init);
+  }
+
+  private async headers(auth = false): Promise<Record<string, string>> {
+    const h: Record<string, string> = {};
+    const extra = typeof this.o.headers === "function" ? await this.o.headers() : this.o.headers;
+    for (const [k, v] of Object.entries(extra ?? {})) {
+      if (typeof v === "string" && !RESERVED_HEADERS.includes(k.toLowerCase())) h[k.toLowerCase()] = v;
+    }
+    h["content-type"] = "application/json";
     if (this.o.gatewayUrl && this.o.gatewayToken) {
       h[HEADER_GATEWAY_URL] = this.o.gatewayUrl;
       h[HEADER_GATEWAY_TOKEN] = this.o.gatewayToken;
@@ -79,16 +104,23 @@ export class ApiClient {
 
   async getConfig(force = false): Promise<PublicConfig> {
     if (this.config && !force) return this.config;
-    this.config = await this.parse<PublicConfig>(await fetch(this.url("config"), { headers: this.headers() }));
+    this.config = await this.parse<PublicConfig>(await this.request(this.url("config"), { headers: await this.headers() }));
     return this.config;
   }
 
   /** When each signed-in session should be refreshed, on this browser's clock. */
   private refreshAt = new WeakMap<SessionResponse, number>();
 
-  private fresh(s: SessionResponse): boolean {
+  /**
+   * Session reuse. A signed-in session follows its schedule (see `scheduleRefresh`). An anonymous
+   * token is refreshed once less than 10% of its lifetime (at most 24 h, at least 30 s) remains; a
+   * stored token from before `obtainedAt` existed uses the 24 h margin.
+   */
+  private fresh(s: HeldSession): boolean {
     if (s.verified) return Date.now() < (this.refreshAt.get(s) ?? 0);
-    return s.expiresAt - Date.now() > ANON_REFRESH_MS;
+    const lifetime = s.obtainedAt ? s.expiresAt - s.obtainedAt : Infinity;
+    const margin = Math.min(86_400_000, Math.max(30_000, lifetime * 0.1));
+    return s.expiresAt - Date.now() > margin;
   }
 
   /**
@@ -96,18 +128,17 @@ export class ApiClient {
    * backend reports (`expiresIn`) counted from receipt, so a short lifetime is not refreshed on every
    * request and a skewed browser clock does not matter.
    */
-  private scheduleRefresh(s: SessionResponse): void {
-    const now = Date.now();
+  private scheduleRefresh(s: HeldSession, now: number): void {
     const life = typeof s.expiresIn === "number" && s.expiresIn > 0 ? s.expiresIn : s.expiresAt - now;
     this.refreshAt.set(s, now + life - Math.min(VERIFIED_REFRESH_MS, life / 2));
   }
 
   /** The stored anonymous visitor session, if any. Signed-in sessions are never stored. */
-  private stored(): SessionResponse | null {
+  private stored(): HeldSession | null {
     const saved = store.get(this.storageKey);
     if (!saved) return null;
     try {
-      const s = JSON.parse(saved) as SessionResponse;
+      const s = JSON.parse(saved) as HeldSession;
       return s.verified ? null : s;
     } catch {
       return null; // corrupted entry
@@ -143,14 +174,17 @@ export class ApiClient {
       body.turnstileToken = await this.o.turnstile(cfg.turnstileSiteKey);
     }
     const s = await this.parse<SessionResponse>(
-      await fetch(this.url("session"), { method: "POST", headers: this.headers(), body: JSON.stringify(body) }),
+      await this.request(this.url("session"), { method: "POST", headers: await this.headers(), body: JSON.stringify(body) }),
     );
-    this.session = s;
+    // obtainedAt lets fresh() size the refresh margin to the server's token lifetime.
+    const now = Date.now();
+    const held: HeldSession = { ...s, obtainedAt: now };
+    this.session = held;
     // A signed-in session stays in memory only: the next page load asks the backend again, so a
     // sign-out or a different user never inherits it.
-    if (s.verified) this.scheduleRefresh(s);
-    else store.set(this.storageKey, JSON.stringify(s));
-    return s;
+    if (held.verified) this.scheduleRefresh(held, now);
+    else store.set(this.storageKey, JSON.stringify(held));
+    return held;
   }
 
   /** Drops the session; the next request creates a new one. A stored anonymous visitor is kept for a signed-in session. */
@@ -174,12 +208,16 @@ export class ApiClient {
 
   /** Starts a web-first link of a chat account for the signed-in user (identity backends only). */
   async link(): Promise<LinkResponse> {
-    const res = await this.signedInRequest(() => fetch(this.url("link"), { method: "POST", headers: this.headers(true), body: "{}" }));
+    const res = await this.signedInRequest(async () =>
+      this.request(this.url("link"), { method: "POST", headers: await this.headers(true), body: "{}" }),
+    );
     return this.parse<LinkResponse>(res);
   }
 
   async history(agent: string, conversationId: string): Promise<HistoryMessage[]> {
-    const res = await this.signedInRequest(() => fetch(this.url("history", { agent, conversationId }), { headers: this.headers(true) }));
+    const res = await this.signedInRequest(async () =>
+      this.request(this.url("history", { agent, conversationId }), { headers: await this.headers(true) }),
+    );
     return (await this.parse<{ messages: HistoryMessage[] }>(res)).messages;
   }
 
@@ -204,11 +242,11 @@ export class ApiClient {
     signal?: AbortSignal,
   ): Promise<void> {
     await this.ensureSession();
-    let res = await fetch(this.url("chat"), { method: "POST", headers: this.headers(true), body: JSON.stringify(input), signal });
+    let res = await this.request(this.url("chat"), { method: "POST", headers: await this.headers(true), body: JSON.stringify(input), signal });
     if (res.status === 401) {
       this.forgetSession();
       await this.ensureSession();
-      res = await fetch(this.url("chat"), { method: "POST", headers: this.headers(true), body: JSON.stringify(input), signal });
+      res = await this.request(this.url("chat"), { method: "POST", headers: await this.headers(true), body: JSON.stringify(input), signal });
     }
     if (!res.ok || !res.body) await this.parse(res);
 
