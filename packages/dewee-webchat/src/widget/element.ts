@@ -122,6 +122,8 @@ interface ViewMessage extends HistoryMessage {
   view?: ViewRefs;
   /** Automatic action-result follow-up: kept in the transcript model, not shown. */
   hidden?: boolean;
+  /** Visitor message the gateway refused (POLICY_DENIED): the localized reason shown next to it. */
+  refusal?: string;
   /** The visitor pressed Stop: never execute directives from a cut-off answer. */
   stopped?: boolean;
   actionsHash?: string;
@@ -699,8 +701,9 @@ export class DeweeChatElement extends ElementBase {
   }
 
   /** Disables sending for `ms` and announces it; the visible countdown is not read out every second. */
-  private startCooldown(ms = DEFAULT_COOLDOWN_MS) {
-    this.cooldown.start(ms);
+  private startCooldown(ms?: number) {
+    // Only a positive finite value is trusted; anything else from a custom backend gets the default.
+    this.cooldown.start(typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_COOLDOWN_MS);
     if (!this.cooldown.active) return;
     this.renderCooldown(this.cooldown.secondsLeft);
     this.els.announcer.textContent = this.strings.cooldownStart(this.cooldown.secondsLeft);
@@ -854,6 +857,15 @@ export class DeweeChatElement extends ElementBase {
     const c = this.config;
     if (m.role === "user") {
       v.md.textContent = m.content;
+      v.root.classList.toggle("refused", !!m.refusal);
+      let note = v.root.querySelector<HTMLElement>(".refusal");
+      if (m.refusal && !note) {
+        note = document.createElement("div");
+        note.className = "refusal";
+        v.root.appendChild(note);
+      }
+      if (note && m.refusal) note.textContent = `⚠️ ${m.refusal}`;
+      else note?.remove();
       return;
     }
     v.root.classList.toggle("error", m.status === "error");
@@ -1056,15 +1068,12 @@ export class DeweeChatElement extends ElementBase {
       this.els.input.value = question.content;
       this.autosize();
     }
-    if (code !== "POLICY_DENIED" || reply.content || !question.view) return false;
+    if (code !== "POLICY_DENIED" || reply.content) return false;
     reply.status = "error";
     reply.hidden = true;
     if (reply.view) reply.view.root.hidden = true;
-    const note = document.createElement("div");
-    note.className = "refusal";
-    note.textContent = `⚠️ ${text}`;
-    question.view.root.classList.add("refused");
-    question.view.root.appendChild(note);
+    question.refusal = text;
+    this.updateMessage(question);
     return true;
   }
 

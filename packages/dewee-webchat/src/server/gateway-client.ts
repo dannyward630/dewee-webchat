@@ -223,7 +223,7 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatS
     .then((res) => { push({ type: "done", content: res?.content ?? "", usage: res?.usage }); end(); })
     .catch((err: GatewayError) => {
       // Admission refusals get a fixed message: the gateway's text never reaches the browser.
-      if (!finished && isAdmissionErrorCode(err.code)) push(admissionErrorEvent(err.code, err.retryAfterMs));
+      if (!finished && isAdmissionErrorCode(err.code)) push(admissionErrorEvent(err.code, err.retryAfterMs, err.message));
       else if (!finished) push(err.remediation ? { type: "error", message: err.message, code: err.code, remediation: err.remediation } : { type: "error", message: err.message, code: err.code });
       end();
     });

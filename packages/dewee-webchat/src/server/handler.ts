@@ -28,7 +28,7 @@ import {
   type GatewayActor,
   type GatewayCredentials,
 } from "./gateway-client";
-import { admissionErrorEvent, admissionErrorResponse } from "./admission-errors";
+import { admissionErrorEvent, admissionErrorResponse, gatewayReasonOf } from "./admission-errors";
 import {
   deriveVisitorId,
   memoryRateLimiter,
@@ -686,7 +686,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
           if (ev.type === "start") continue; // already announced with the conversation id
           if (ev.type === "done") reply = ev.content;
           if (ev.type === "error") {
-            errMsg = ev.message;
+            errMsg = gatewayReasonOf(ev) ?? ev.message; // onChat sees the gateway's reason; the browser does not
             if (claims.ids && ev.code && DEAD_SESSION_CODES.has(ev.code)) forgetCachedSession(claims.ids);
           }
           await send(ev);
@@ -695,7 +695,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       } catch (e) {
         // A refused connect (anonymous visitors connect inside streamChat) is still an admission refusal.
         const admission = e instanceof GatewayError && isAdmissionErrorCode(e.code) ? admissionErrorEvent(e.code, e.retryAfterMs) : null;
-        errMsg = admission ? admission.message : (e as Error).message;
+        errMsg = (e as Error).message;
         await send(admission ?? { type: "error", message: errMsg, code: "gateway_error" });
       } finally {
         connection?.close(); // idempotent; covers a turn that ended before the stream took the connection

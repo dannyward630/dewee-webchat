@@ -93,6 +93,8 @@ describe.skipIf(!hasPhp)("PHP backend parity (admission errors)", () => {
       { code: "RATE_LIMITED", retryAfterMs: -1 },
       { code: "RATE_LIMITED", retryAfterMs: 1e9 },
       { code: "RATE_LIMITED", retryAfterMs: "soon" },
+      { code: "RATE_LIMITED", retryAfterMs: "0x10" },
+      { code: "RATE_LIMITED", retryAfterMs: " 1.5e3 " },
       { code: "CHALLENGE_REQUIRED", retryAfterMs: 10 },
     ] as const;
     const dir = mkdtempSync(join(tmpdir(), "dewee-php-"));

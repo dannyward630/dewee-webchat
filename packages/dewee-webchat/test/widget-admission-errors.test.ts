@@ -85,6 +85,10 @@ describe("<dewee-chat> admission errors", () => {
     expect(shadow.querySelector<HTMLElement>(".cooldown")!.hidden).toBe(true);
     expect(shadow.querySelector("textarea")!.value).toBe("a very long message");
     expect(shadow.querySelector<HTMLButtonElement>(".send")!.disabled).toBe(false);
+    // A re-render (any attribute change) keeps the refusal next to the message.
+    el.setAttribute("theme", "dark");
+    expect(shadow.querySelector(".msg.user.refused .refusal")?.textContent).toContain("This message can't be sent.");
+    expect(shadow.querySelectorAll(".msg.assistant:not([hidden])")).toHaveLength(0);
   });
 
   it("shows CHALLENGE_REQUIRED as a plain localized error, with no challenge UI", async () => {

@@ -21,20 +21,33 @@ export const DEFAULT_RETRY_AFTER_MS = 5_000;
 /** Upper bound of the cooldown passed to the browser, so a bogus value cannot lock the widget for long. */
 export const MAX_RETRY_AFTER_MS = 600_000;
 
-/** A positive whole number of milliseconds, defaulted and capped. */
+const DECIMAL_RE = /^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/;
+
+/** A positive whole number of milliseconds, defaulted and capped. Strings count only in decimal notation. */
 export function normalizeRetryAfterMs(raw: unknown): number {
-  const n = typeof raw === "number" ? raw : typeof raw === "string" && raw.trim() !== "" ? Number(raw) : NaN;
+  const n = typeof raw === "number" ? raw : typeof raw === "string" && DECIMAL_RE.test(raw) ? Number(raw) : NaN;
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_RETRY_AFTER_MS;
   return Math.min(Math.ceil(n), MAX_RETRY_AFTER_MS);
 }
 
 export type AdmissionErrorEvent = Extract<ChatStreamEvent, { type: "error" }>;
 
+/** The gateway's own text of each refusal event, for the server-side `onChat` observer only. */
+const gatewayReasons = new WeakMap<object, string>();
+
+/** The gateway's message behind a stream event, when it was replaced by a fixed one. Never sent to browsers. */
+export function gatewayReasonOf(event: object): string | undefined {
+  return gatewayReasons.get(event);
+}
+
 /** The SSE `error` event of an admission refusal. Only `RATE_LIMITED` carries `retryAfterMs`. */
-export function admissionErrorEvent(code: AdmissionErrorCode, retryAfterMs?: unknown): AdmissionErrorEvent {
-  return code === "RATE_LIMITED"
-    ? { type: "error", message: MESSAGES[code], code, retryAfterMs: normalizeRetryAfterMs(retryAfterMs) }
-    : { type: "error", message: MESSAGES[code], code };
+export function admissionErrorEvent(code: AdmissionErrorCode, retryAfterMs?: unknown, gatewayReason?: string): AdmissionErrorEvent {
+  const event: AdmissionErrorEvent =
+    code === "RATE_LIMITED"
+      ? { type: "error", message: MESSAGES[code], code, retryAfterMs: normalizeRetryAfterMs(retryAfterMs) }
+      : { type: "error", message: MESSAGES[code], code };
+  if (gatewayReason) gatewayReasons.set(event, gatewayReason);
+  return event;
 }
 
 /** Status, JSON body and headers of an admission refusal answered before streaming starts. */

@@ -30,8 +30,8 @@ beforeAll(async () => {
 
 afterAll(() => wss.close());
 
-async function chat(error: Record<string, unknown>): Promise<{ res: Response; events: ChatStreamEvent[] }> {
-  const h = createDeweeHandler({ gatewayUrl, token: "good", secret: "s".repeat(32), agents: ["support"], rateLimit: false });
+async function chat(error: Record<string, unknown>, onChat?: (info: { error?: string }) => void): Promise<{ res: Response; events: ChatStreamEvent[] }> {
+  const h = createDeweeHandler({ gatewayUrl, token: "good", secret: "s".repeat(32), agents: ["support"], rateLimit: false, onChat });
   const s = (await (await h(new Request("https://site.test/api/dewee/session", { method: "POST", body: "{}" }))).json()) as { token: string };
   const res = await h(
     new Request("https://site.test/api/dewee/chat", {
@@ -62,6 +62,7 @@ describe("admission error mapping", () => {
   it("defaults and caps retryAfterMs", () => {
     for (const bad of [undefined, null, 0, -5, NaN, Infinity, "", "soon", true, {}]) expect(normalizeRetryAfterMs(bad)).toBe(DEFAULT_RETRY_AFTER_MS);
     expect(normalizeRetryAfterMs("2500")).toBe(2500);
+    expect(normalizeRetryAfterMs("0x10")).toBe(DEFAULT_RETRY_AFTER_MS); // decimal only, as in the PHP handler
     expect(normalizeRetryAfterMs(10 * MAX_RETRY_AFTER_MS)).toBe(MAX_RETRY_AFTER_MS);
   });
 
@@ -98,5 +99,11 @@ describe("POST /chat with a refused chat.send", () => {
       const { events } = await chat({ code, retryAfterMs: 100 });
       expect(JSON.stringify(events)).not.toContain("acme");
     }
+  });
+
+  it("still tells the server-side onChat observer the gateway's reason", async () => {
+    const seen: (string | undefined)[] = [];
+    await chat({ code: "RATE_LIMITED", retryAfterMs: 100 }, (info) => seen.push(info.error));
+    expect(seen).toEqual([SECRET_TEXT]);
   });
 });

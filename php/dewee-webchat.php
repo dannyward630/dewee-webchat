@@ -360,12 +360,13 @@ final class DeweeWebchat
         $errMsg = null;
         try {
             $emit(['type' => 'start', 'conversationId' => $conversationId, 'agent' => $agent, 'actionsHash' => $actionsHash]);
-            $observe = static function (array $e) use ($emit, &$reply, &$errMsg): bool {
+            // $reason: the gateway's own text of a refusal, for onChat only (never sent to the browser).
+            $observe = static function (array $e, ?string $reason = null) use ($emit, &$reply, &$errMsg): bool {
                 if ($e['type'] === 'done') {
                     $reply = (string) $e['content'];
                 }
                 if ($e['type'] === 'error') {
-                    $errMsg = (string) $e['message'];
+                    $errMsg = $reason ?? (string) $e['message'];
                 }
                 return $emit($e);
             };
@@ -384,7 +385,7 @@ final class DeweeWebchat
             $event = $e instanceof DeweeGatewayError && in_array($e->gatewayCode, self::ADMISSION_ERROR_CODES, true)
                 ? self::gatewayErrorEvent($e)
                 : ['type' => 'error', 'message' => $e->getMessage(), 'code' => 'gateway_error'];
-            $errMsg = (string) $event['message'];
+            $errMsg = $e->getMessage();
             $emit($event);
         } finally {
             if (isset($this->o['onChat']) && is_callable($this->o['onChat'])) {
@@ -1013,7 +1014,6 @@ final class DeweeWebchat
         return (int) floor(microtime(true) * 1000);
     }
 
-    /** Drops null values (JSON.stringify omits undefined). */
     /** Admission refusals of chat.send. Mirrors protocol.ts and admission-errors.ts. */
     public const ADMISSION_ERROR_CODES = ['POLICY_DENIED', 'RATE_LIMITED', 'CHALLENGE_REQUIRED'];
     public const DEFAULT_RETRY_AFTER_MS = 5000;
@@ -1049,6 +1049,7 @@ final class DeweeWebchat
             : ['type' => 'error', 'message' => $e->getMessage(), 'code' => $e->gatewayCode];
     }
 
+    /** Drops null values (JSON.stringify omits undefined). */
     public static function withoutNulls(array $a): array
     {
         return array_filter($a, static fn ($v) => $v !== null);
@@ -1194,7 +1195,7 @@ final class DeweeGatewayConnection
      * $emit and $idle return false when the visitor disconnected; the run is then aborted.
      *
      * @param array{url: string, token: string, tenantId?: string} $creds
-     * @param callable(array<string, mixed>): bool $emit
+     * @param callable(array<string, mixed>, ?string=): bool $emit second argument: the gateway's text of a refusal, for onChat only
      * @param callable(): bool $idle
      */
     public static function streamChat(array $creds, string $userId, string $agent, string $sessionKey, string $message, int $timeoutMs, callable $emit, callable $idle): void
@@ -1213,7 +1214,7 @@ final class DeweeGatewayConnection
                 try {
                     $frame = $conn->next(min(1.0, $remaining));
                 } catch (DeweeGatewayError $e) {
-                    $emit(DeweeWebchat::gatewayErrorEvent($e));
+                    $emit(DeweeWebchat::gatewayErrorEvent($e), $e->getMessage());
                     break;
                 }
                 if ($frame === null) {
@@ -1228,7 +1229,7 @@ final class DeweeGatewayConnection
                         $res = self::result($frame);
                         $emit(['type' => 'done', 'content' => (string) (self::prop($res, 'content') ?? ''), 'usage' => self::prop($res, 'usage')]);
                     } catch (DeweeGatewayError $e) {
-                        $emit(DeweeWebchat::gatewayErrorEvent($e));
+                        $emit(DeweeWebchat::gatewayErrorEvent($e), $e->getMessage());
                     }
                     break;
                 }

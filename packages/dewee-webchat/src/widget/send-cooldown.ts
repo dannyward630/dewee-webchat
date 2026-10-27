@@ -27,6 +27,7 @@ export class SendCooldown {
     this.clear();
     this.tick = setInterval(() => this.onTick(this.secondsLeft), 1000);
     this.done = setTimeout(() => {
+      this.until = 0; // ends on elapsed time, even if the wall clock moved back meanwhile
       this.clear();
       this.onEnd();
     }, until - Date.now());
