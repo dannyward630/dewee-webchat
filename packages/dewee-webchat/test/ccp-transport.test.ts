@@ -327,9 +327,17 @@ describe("ccp transport: refusals and failures", () => {
     expect(r.status).toBe(403);
     expect(r.json().error.code).toBe("agent_not_allowed");
     expect(ccp.routes("chat")).toHaveLength(1);
-    const bad = await chat(h, s.token, { agent: "../../tenant" });
-    expect(bad.status).toBe(403);
+    // Not an agent key the ingress accepts: refused here, CCP is not asked.
+    for (const agent of ["../../tenant", "agent:shop", "-shop", "a".repeat(101)]) {
+      const bad = await chat(h, s.token, { agent });
+      expect([agent, bad.status, bad.json().error.code]).toEqual([agent, 400, "bad_request"]);
+      expect((await history(h, s.token, "conv_ccp_0001", encodeURIComponent(agent))).status).toBe(400);
+    }
     expect(ccp.routes("chat")).toHaveLength(1);
+    expect(ccp.routes("history")).toHaveLength(0);
+    // The longest key the ingress accepts reaches it.
+    expect((await chat(h, s.token, { agent: "a".repeat(100) })).status).toBe(403);
+    expect(ccp.routes("chat")).toHaveLength(2);
   });
 
   it("replaces a failed run's message with its own text", async () => {

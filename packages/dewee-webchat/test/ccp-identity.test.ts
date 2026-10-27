@@ -231,7 +231,25 @@ describe("ccp identity: link", () => {
     // CCP's `{channel, url}`: the channel names the account; the URL and a malformed channel are dropped.
     expect(r.json()).toEqual({ proofCode: "482913", expiresAt: expect.any(Number), deepLinks: [{ channelType: "telegram", channelInstanceId: "", name: "telegram" }] });
     expect(r.text).not.toContain("t.me");
-    expect(ccp.routes("link")[0].headers["idempotency-key"]).toBe("k-1");
+    // The host's key is mapped to one the ingress accepts (8 to 128 of [A-Za-z0-9._:-]), the same each time.
+    const sent = ccp.routes("link")[0].headers["idempotency-key"];
+    expect(sent).toMatch(/^[A-Za-z0-9._:-]{8,128}$/);
+    expect(sent).not.toBe("k-1");
+  });
+
+  it("maps any key the browser contract allows to a stable ingress key, and leaves an absent one absent", async () => {
+    const h = makeHandler();
+    const a = (await session(h, "user-a")).json();
+    const link = (idempotencyKey?: string) =>
+      h(new Request(`${BASE}/link`, { method: "POST", headers: { authorization: `Bearer ${a.token}` }, body: JSON.stringify(idempotencyKey === undefined ? {} : { idempotencyKey }) }));
+    const long = "~".repeat(255);
+    for (const key of ["k", long, "a/b?c=d#e!", long]) expect((await link(key)).status).toBe(200);
+    await link();
+    const keys = ccp.routes("link").map((r) => r.headers["idempotency-key"]);
+    for (const k of keys.slice(0, 4)) expect(k).toMatch(/^[A-Za-z0-9._:-]{8,128}$/);
+    expect(new Set(keys.slice(0, 4)).size).toBe(3);
+    expect(keys[1]).toBe(keys[3]);
+    expect(keys[4]).toBeUndefined();
   });
 
   it("refuses anonymous visitors and maps CCP link conflicts", async () => {

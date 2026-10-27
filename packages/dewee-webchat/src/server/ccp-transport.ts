@@ -11,13 +11,22 @@ import { isAdmissionErrorCode, isIdentityErrorCode, type AdmissionErrorCode, typ
 import { CcpClient, CcpError, knownRemediation, readSseJson, type CcpRequest, type CcpRoute } from "./ccp-client";
 import { DEAD_SESSION_CODES, IDENTITY_ERRORS } from "./identity-errors";
 import { admissionErrorEvent } from "./admission-errors";
+import { sha256B64url } from "./security";
 import type { DeweeIdentitySdk, IdentitySigner } from "./handler";
 
 // Upstream JSON is read as `any` only inside the parsers of this module; every field is type-checked
 // before it is used or forwarded.
 
-/** Agent keys as the ingress names them; same alphabet as the handler's agent ids. */
-const AGENT_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
+/** Agent keys as the ingress accepts them: up to 100 characters, an alphanumeric first, no `:`. */
+export const CCP_AGENT_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+/**
+ * The ingress takes `Idempotency-Key` as 8 to 128 of `[A-Za-z0-9._:-]`, narrower than the browser
+ * contract's 1 to 255 printable characters. Every key is hashed to one it accepts, so the same host key
+ * always names the same request and two different keys never meet.
+ */
+export async function ccpIdempotencyKey(key: string): Promise<string> {
+  return sha256B64url(key);
+}
 /** Visitor and conversation ids as the ingress accepts them. */
 export const CCP_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const EDGE_TOKEN_RE = /^dws1\.[A-Za-z0-9_.-]{1,1019}$/;
@@ -171,7 +180,7 @@ function parseConfig(data: Record<string, any>): CcpConfig {
   const agents: AgentInfo[] = [];
   for (const a of rawAgents.slice(0, 50)) {
     const key = a?.key;
-    if (typeof key !== "string" || !AGENT_RE.test(key) || agents.some((x) => x.id === key)) continue;
+    if (typeof key !== "string" || !CCP_AGENT_RE.test(key) || agents.some((x) => x.id === key)) continue;
     const name = str(a.name, 200);
     const description = str(a.description, 1000);
     agents.push({ id: key, ...(name ? { name } : {}), ...(description ? { description } : {}) });
@@ -334,7 +343,7 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
       let started = false;
       const start = (f?: any): ChatStreamEvent => {
         started = true;
-        const agent = typeof f?.agent === "string" && AGENT_RE.test(f.agent) ? f.agent : requestedAgent;
+        const agent = typeof f?.agent === "string" && CCP_AGENT_RE.test(f.agent) ? f.agent : requestedAgent;
         const runId = typeof f?.runId === "string" && f.runId.length <= 128 ? f.runId : undefined;
         return { type: "start", conversationId, agent, ...(runId ? { runId } : {}) };
       };
@@ -456,7 +465,8 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
     /** Web-first link for a signed-in visitor. */
     async link(ctx: VisitorContext, visitorId: string, sealed: EdgeSession | undefined, input: { identitySession: string; agent?: string; idempotencyKey?: string }): Promise<LinkResponse> {
       const body = { identity_session: input.identitySession, ...withAgent(input.agent) };
-      const data = await withEdge(ctx, visitorId, sealed, (edge) => client.json<Record<string, any>>("link", { ...base(ctx), body, session: edge.token, idempotencyKey: input.idempotencyKey }));
+      const idempotencyKey = input.idempotencyKey === undefined ? undefined : await ccpIdempotencyKey(input.idempotencyKey);
+      const data = await withEdge(ctx, visitorId, sealed, (edge) => client.json<Record<string, any>>("link", { ...base(ctx), body, session: edge.token, idempotencyKey }));
       if (typeof data.proof_code !== "string" || data.proof_code === "") throw new CcpError(201, "ccp_bad_response", "CCP link: no proof code");
       const expires = Date.parse(String(data.expires_at));
       // CCP names each chat account by its channel (`{channel, url}`); the browser shape has no URL,

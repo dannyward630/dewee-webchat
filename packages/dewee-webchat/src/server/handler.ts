@@ -49,7 +49,7 @@ import {
 import { DEAD_SESSION_CODES, IDENTITY_ERRORS } from "./identity-errors";
 import { CcpClient, CcpError, parseCcpOptions, type CcpOptions } from "./ccp-client";
 import { resolveTransport } from "./transport-selection";
-import { CCP_ID_RE, EDGE_RESEAL_MS, browserErrorFor, createCcpTransport, type BrowserError, type CcpConfig, type EdgeSession, type VisitorContext } from "./ccp-transport";
+import { CCP_AGENT_RE, CCP_ID_RE, EDGE_RESEAL_MS, browserErrorFor, createCcpTransport, type BrowserError, type CcpConfig, type EdgeSession, type VisitorContext } from "./ccp-transport";
 
 /**
  * A signed-in user of the host app, as `identity.authenticate` reports it. Scopes are not part of
@@ -285,7 +285,7 @@ function checkIdentityOptions(o: DeweeHandlerOptions, staticAgents: AgentInfo[],
   if (ttl !== undefined && (!Number.isInteger(ttl) || ttl < 60 || ttl > 43200)) refuse("sessionTtlSeconds must be an integer from 60 to 43200");
   // With ccp the integration names its agents; an unset identity.agent means its default agent.
   if (transport === "ccp") {
-    if (idn.agent !== undefined && (typeof idn.agent !== "string" || !AGENT_RE.test(idn.agent))) refuse("agent must be an agent key");
+    if (idn.agent !== undefined && (typeof idn.agent !== "string" || !CCP_AGENT_RE.test(idn.agent))) refuse("agent must be an agent key");
     return idn.agent ?? "";
   }
   const agent = idn.agent || o.defaultAgent || staticAgents[0]?.id;
@@ -921,7 +921,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
     // CCP accepts 8 to 64 characters; a shorter id the browser chose counts as invalid and is replaced.
     const idRe = ccp ? CCP_ID_RE : ID_RE;
     const conversationId = typeof body?.conversationId === "string" && idRe.test(body.conversationId) ? body.conversationId : randomId(9);
-    const agent = ccp ? ccpAgentFor(claims, body?.agent) : await agentFor(claims, body?.agent, creds, isByo);
+    const agent = ccp ? ccpAgentFor(req, claims, body?.agent) : await agentFor(claims, body?.agent, creds, isByo);
+    if (agent instanceof Response) return agent;
     if (agent === null) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
 
     // Page actions: the manifest (no handlers) and page context become a delimited block in front of the
@@ -1005,12 +1006,15 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
   /**
    * CCP: the agent a request names is forwarded for CCP to authorize against the integration's set;
    * a signed-in token stays on the agent its identity session is bound to. "" = the integration default.
+   * A name that is not an agent key CCP accepts is refused here (400), one the token may not use is 403.
    */
-  function ccpAgentFor(claims: VisitorClaims, requested: unknown): string | null {
-    if (requested !== undefined && requested !== null && requested !== "" && (typeof requested !== "string" || !AGENT_RE.test(requested))) return null;
+  function ccpAgentFor(req: Request, claims: VisitorClaims, requested: unknown): string | Response {
+    if (requested !== undefined && requested !== null && requested !== "" && (typeof requested !== "string" || !CCP_AGENT_RE.test(requested))) {
+      return fail(req, 400, "Invalid agent");
+    }
     const asked = (requested as string | undefined) || "";
-    if (claims.ids) return !asked || asked === claims.ida ? claims.ida! : null;
-    return asked;
+    if (claims.ids && asked && asked !== claims.ida) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
+    return claims.ids ? claims.ida! : asked;
   }
 
   /** CCP: one turn. CCP's verdict arrives before the stream, so refusals are typed JSON errors. */
@@ -1136,8 +1140,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
     const url = new URL(req.url);
     const conversationId = url.searchParams.get("conversationId") || "";
     if (!ID_RE.test(conversationId)) return fail(req, 400, "Invalid conversationId");
-    const agent = ccpAgentFor(claims, url.searchParams.get("agent"));
-    if (agent === null) return fail(req, 403, "Agent not allowed", "agent_not_allowed");
+    const agent = ccpAgentFor(req, claims, url.searchParams.get("agent"));
+    if (agent instanceof Response) return agent;
     // A browser-valid id CCP cannot hold has no conversation yet.
     if (!CCP_ID_RE.test(conversationId)) return json(req, { messages: [] });
     try {
