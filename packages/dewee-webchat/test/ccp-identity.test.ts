@@ -174,7 +174,9 @@ describe("ccp identity: link", () => {
     const a = (await session(h, "user-a")).json();
     const r = await h(new Request(`${BASE}/link`, { method: "POST", headers: { authorization: `Bearer ${a.token}` }, body: JSON.stringify({ idempotencyKey: "k-1" }) }));
     expect(r.status).toBe(200);
-    expect(r.json()).toEqual({ proofCode: "482913", expiresAt: expect.any(Number), deepLinks: [{ channelType: "telegram", channelInstanceId: "ci_1", name: "acme-bot", displayName: "Acme Bot" }] });
+    // CCP's `{channel, url}`: the channel names the account; the URL and a malformed channel are dropped.
+    expect(r.json()).toEqual({ proofCode: "482913", expiresAt: expect.any(Number), deepLinks: [{ channelType: "telegram", channelInstanceId: "", name: "telegram" }] });
+    expect(r.text).not.toContain("t.me");
     expect(ccp.routes("link")[0].headers["idempotency-key"]).toBe("k-1");
   });
 

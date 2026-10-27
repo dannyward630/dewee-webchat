@@ -8,7 +8,7 @@
 // verbatim: events and errors are rebuilt from known fields with this module's own messages.
 import { stripPageBlock } from "../actions/page-block";
 import { isIdentityErrorCode, type AgentInfo, type ChatStreamEvent, type HistoryMessage, type IdentityErrorCode, type LinkResponse, type Remediation, type ToolCallView } from "../protocol";
-import { CcpClient, CcpError, readSseJson, type CcpRequest, type CcpRoute } from "./ccp-client";
+import { CcpClient, CcpError, knownRemediation, readSseJson, type CcpRequest, type CcpRoute } from "./ccp-client";
 import { DEAD_SESSION_CODES, IDENTITY_ERRORS } from "./identity-errors";
 import type { DeweeIdentitySdk, IdentitySigner } from "./handler";
 
@@ -25,6 +25,14 @@ const MAX_IDENTITY_SESSION_LENGTH = 512;
 const CONFIG_TTL_MS = 60_000;
 /** An edge session this close to expiry is refreshed before use. */
 const EDGE_MARGIN_MS = 30_000;
+/**
+ * `/session` hands out an edge session with at least this long left, refreshing one that is closer
+ * to its end. The widget comes back for a new token once a tenth of the lifetime it was given
+ * remains (six minutes of a one-hour edge session), so a token it receives always carries an edge
+ * session that is still fresh when it next asks.
+ */
+export const EDGE_RESEAL_MS = 15 * 60_000;
+const CHANNEL_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 /** CCP refreshes an expired edge session for at most this long after its expiry (contract §1.4). */
 const EDGE_REFRESH_WINDOW_MS = 24 * 3600_000;
 const MAX_CACHED_EDGES = 5000;
@@ -114,6 +122,9 @@ export function browserErrorFor(e: unknown, route: CcpRoute): BrowserError {
     case "ccp_redirect":
       log("error", "- refused to follow a redirect; DEWEE_CCP_CHAT_URL must be the final ingress URL");
       return GENERIC_UNAVAILABLE;
+    case "ccp_timeout":
+      log("error", "- CCP did not answer in time");
+      return GENERIC_UNAVAILABLE;
     default:
       if (e.status === 429) return { status: 429, code: "rate_limited", message: "Too many messages, please wait a moment", retryAfterSeconds: e.retryAfterSeconds };
       log("error", "");
@@ -124,8 +135,7 @@ export function browserErrorFor(e: unknown, route: CcpRoute): BrowserError {
 /** The SSE `error` event for a code a run ended with. Messages are this module's own. */
 function streamError(code: unknown, remediation: unknown): ChatStreamEvent {
   if (isIdentityErrorCode(code)) {
-    const r = remediation as Remediation | undefined;
-    const valid = r && typeof r.action === "string" && typeof r.audience === "string" ? { action: r.action, audience: r.audience } : undefined;
+    const valid: Remediation | undefined = knownRemediation(remediation);
     return { type: "error", code, message: IDENTITY_ERRORS[code].message, ...(valid ? { remediation: valid } : {}) };
   }
   if (code === "cancelled") return { type: "error", code: "cancelled", message: "Cancelled" };
@@ -238,12 +248,15 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
     return remember(visitorId, { token, expiresAt: Date.now() + lifetime });
   }
 
-  /** A usable edge session: cached, sealed in the visitor token, refreshed, or new. */
-  async function edgeFor(ctx: VisitorContext, visitorId: string, sealed?: EdgeSession, force?: "refresh" | "create"): Promise<EdgeSession> {
+  /**
+   * A usable edge session: cached, sealed in the visitor token, refreshed, or new. One with no more
+   * than `minRemainingMs` left is refreshed (while CCP still accepts it) instead of used.
+   */
+  async function edgeFor(ctx: VisitorContext, visitorId: string, sealed?: EdgeSession, force?: "refresh" | "create", minRemainingMs = EDGE_MARGIN_MS): Promise<EdgeSession> {
     const now = Date.now();
     const cached = edges.get(visitorId);
     const known = [cached, sealed].filter((e): e is EdgeSession => !!e).sort((a, b) => b.expiresAt - a.expiresAt)[0];
-    if (!force && known && known.expiresAt - now > EDGE_MARGIN_MS) return known;
+    if (!force && known && known.expiresAt - now > minRemainingMs) return known;
     if (force !== "create" && known && now - known.expiresAt < EDGE_REFRESH_WINDOW_MS - EDGE_MARGIN_MS) {
       try {
         return await openEdge(ctx, visitorId, known.token);
@@ -399,12 +412,15 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
       return out;
     },
 
-    /** Signs a partner assertion for `subject` and exchanges it at CCP for an identity session. */
-    async exchange(ctx: VisitorContext, visitorId: string, subject: string, agent?: string): Promise<CcpExchangeResult> {
+    /**
+     * Signs a partner assertion for `subject` and exchanges it at CCP for an identity session. `sealed`
+     * is the user's edge session from an earlier token, refreshed rather than replaced when stale.
+     */
+    async exchange(ctx: VisitorContext, visitorId: string, subject: string, agent?: string, sealed?: EdgeSession): Promise<CcpExchangeResult> {
       if (!identity) throw new Error("identity is not configured");
       const assertion = await identity.createAssertion({ ...identity.signer(), purpose: "session", subject });
       const body = { assertion, ...(identity.ttlSeconds ? { ttl_seconds: identity.ttlSeconds } : {}), ...withAgent(agent) };
-      const data = await withEdge(ctx, visitorId, undefined, (edge) => client.json<Record<string, unknown>>("identity/exchange", { ...base(ctx), body, session: edge.token }));
+      const data = await withEdge(ctx, visitorId, sealed, (edge) => client.json<Record<string, unknown>>("identity/exchange", { ...base(ctx), body, session: edge.token }));
       const token = data.identity_session;
       const principal = data.principal_ref;
       const expiresAt = new Date(String(data.expires_at));
@@ -427,13 +443,10 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
       const data = await withEdge(ctx, visitorId, sealed, (edge) => client.json<Record<string, any>>("link", { ...base(ctx), body, session: edge.token, idempotencyKey: input.idempotencyKey }));
       if (typeof data.proof_code !== "string" || data.proof_code === "") throw new CcpError(201, "ccp_bad_response", "CCP link: no proof code");
       const expires = Date.parse(String(data.expires_at));
+      // CCP names each chat account by its channel (`{channel, url}`); the browser shape has no URL,
+      // so the channel is also its name.
       const deepLinks = (Array.isArray(data.deep_links) ? data.deep_links.slice(0, 20) : [])
-        .map((t: any) => {
-          const channelType = str(t?.channel_type ?? t?.channel, 64);
-          const name = str(t?.name, 200) ?? channelType;
-          const displayName = str(t?.display_name, 200);
-          return channelType && name ? { channelType, channelInstanceId: str(t?.channel_instance_id, 128) ?? "", name, ...(displayName ? { displayName } : {}) } : null;
-        })
+        .map((t: any) => (typeof t?.channel === "string" && CHANNEL_RE.test(t.channel) ? { channelType: t.channel, channelInstanceId: "", name: t.channel } : null))
         .filter((t: unknown): t is LinkResponse["deepLinks"][number] => t !== null);
       return { proofCode: data.proof_code.slice(0, 64), expiresAt: Number.isFinite(expires) ? expires : Date.now() + 600_000, deepLinks };
     },

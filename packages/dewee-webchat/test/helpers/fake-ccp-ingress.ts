@@ -234,7 +234,8 @@ export async function startFakeCcp(): Promise<FakeCcp> {
       return send(res, 200, { revoked: true });
     }
     if (route === "link") {
-      return send(res, 201, { proof_code: "482913", expires_at: new Date(Date.now() + 600_000).toISOString(), deep_links: [{ channel_type: "telegram", channel_instance_id: "ci_1", name: "acme-bot", display_name: "Acme Bot", url: "https://t.me/acme_bot?start=482913" }] });
+      // The real shape: `{channel, url}` per chat account (contract §1.8).
+      return send(res, 201, { proof_code: "482913", expires_at: new Date(Date.now() + 600_000).toISOString(), deep_links: [{ channel: "telegram", url: "https://t.me/acme_bot?start=482913" }, { channel: "bad channel!", url: "https://x.example" }] });
     }
     return error(res, 404, "not_found");
   }

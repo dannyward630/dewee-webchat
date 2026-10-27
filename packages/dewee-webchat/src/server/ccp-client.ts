@@ -30,6 +30,43 @@ const SECRET_RE = /^dwc_[A-Za-z0-9_-]{16,256}$/;
 const INGRESS_PATH_RE = /\/api\/public\/webchat\/v1\/(wci_[a-z2-7]{26})$/;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 const CODE_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+/** Longest wait for one JSON call (headers and body); a hung ingress must not hold requests forever. */
+export const CCP_JSON_TIMEOUT_MS = 15_000;
+
+/** Remediation values of the identity contract; anything else from CCP is dropped before it can reach a browser. */
+const REMEDIATION_ACTIONS = new Set(["send_connect_link", "ask_user_to_dm", "retry_later", "contact_admin", "reauthenticate"]);
+const REMEDIATION_AUDIENCES = new Set(["end_user", "operator", "integrator"]);
+
+/** A remediation CCP sent, kept only when both fields are known values. */
+export function knownRemediation(raw: unknown): { action: string; audience: string } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { action, audience } = raw as { action?: unknown; audience?: unknown };
+  return typeof action === "string" && typeof audience === "string" && REMEDIATION_ACTIONS.has(action) && REMEDIATION_AUDIENCES.has(audience) ? { action, audience } : undefined;
+}
+
+/**
+ * The caller's signal combined with a deadline. A timer (not `AbortSignal.timeout`) so that the
+ * deadline can be cleared as soon as the call is done and never keeps a process alive.
+ */
+function withDeadline(signal: AbortSignal | undefined, ms: number): { signal: AbortSignal; timedOut(): boolean; dispose(): void } {
+  const ctl = new AbortController();
+  let fired = false;
+  const timer = setTimeout(() => {
+    fired = true;
+    ctl.abort(new DOMException("CCP request timed out", "TimeoutError"));
+  }, ms);
+  const onAbort = () => ctl.abort(signal?.reason);
+  if (signal?.aborted) ctl.abort(signal.reason);
+  else signal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    signal: ctl.signal,
+    timedOut: () => fired && !signal?.aborted,
+    dispose() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
 
 /** Throws a startup error naming what is wrong. Never echoes the secret. */
 export function parseCcpOptions(raw: Partial<CcpOptions> | undefined): Required<Omit<CcpOptions, "fetch">> & { fetch?: typeof fetch; origin: string } {
@@ -143,12 +180,26 @@ export class CcpClient {
     throw await errorFrom(res);
   }
 
-  /** {@link send} and parse a JSON object body. */
+  /**
+   * {@link send} and parse a JSON object body, within {@link CCP_JSON_TIMEOUT_MS} (headers and body)
+   * on top of the caller's own signal. A deadline that passes is `ccp_timeout`; a caller that aborts
+   * gets its own abort error.
+   */
   async json<T = Record<string, unknown>>(route: CcpRoute, req: CcpRequest = {}): Promise<T> {
-    const res = await this.send(route, req);
-    const data = await res.json().catch(() => null);
-    if (data === null || typeof data !== "object" || Array.isArray(data)) throw new CcpError(res.status, "ccp_bad_response", `CCP ${route} returned a body that is not a JSON object`);
-    return data as T;
+    const deadline = withDeadline(req.signal, CCP_JSON_TIMEOUT_MS);
+    const timeout = () => new CcpError(0, "ccp_timeout", `CCP ${route} did not answer within ${CCP_JSON_TIMEOUT_MS} ms`);
+    try {
+      const res = await this.send(route, { ...req, signal: deadline.signal });
+      const data = await res.json().catch(() => null);
+      if (deadline.timedOut()) throw timeout();
+      if (data === null || typeof data !== "object" || Array.isArray(data)) throw new CcpError(res.status, "ccp_bad_response", `CCP ${route} returned a body that is not a JSON object`);
+      return data as T;
+    } catch (e) {
+      if (deadline.timedOut() && !(e instanceof CcpError && e.code === "ccp_timeout")) throw timeout();
+      throw e;
+    } finally {
+      deadline.dispose();
+    }
   }
 }
 
@@ -160,34 +211,40 @@ async function errorFrom(res: Response): Promise<CcpError> {
   const message = typeof e?.message === "string" ? e.message.slice(0, 500) : `HTTP ${res.status}`;
   const header = Number(res.headers.get("retry-after"));
   const retry = Number.isFinite(e?.retry_after_seconds) && e.retry_after_seconds > 0 ? Number(e.retry_after_seconds) : header > 0 ? header : undefined;
-  const r = e?.remediation;
-  const remediation = r && typeof r.action === "string" && typeof r.audience === "string" ? { action: r.action, audience: r.audience } : undefined;
-  return new CcpError(res.status, code, message, retry, remediation);
+  return new CcpError(res.status, code, message, retry, knownRemediation(e?.remediation));
 }
 
 /**
  * Parses an SSE body into the JSON payloads of its `data:` frames. Comment frames (`: ping`) are
- * skipped; a frame whose data is not JSON is skipped too. Frames are bounded so a misbehaving
- * upstream cannot grow the buffer without limit.
+ * skipped; a frame whose data is not JSON is skipped too. Line endings may be `\n`, `\r\n` or `\r`,
+ * also when a `\r\n` is split across two chunks, and a last frame without its closing blank line is
+ * still delivered at the end of the stream. Frames are bounded so a misbehaving upstream cannot grow
+ * the buffer without limit.
  */
 export async function* readSseJson(body: ReadableStream<Uint8Array>, maxFrameBytes = 1_048_576): AsyncGenerator<unknown> {
   const reader = body.getReader();
   const dec = new TextDecoder();
   let buf = "";
+  // A chunk ending in "\r" may be the first half of "\r\n": it is held until the next chunk shows.
+  let heldCr = false;
+  const frameData = (frame: string): string =>
+    frame
+      .split("\n")
+      .filter((l) => l.startsWith("data:"))
+      .map((l) => l.slice(5).replace(/^ /, ""))
+      .join("\n");
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true }).replace(/\r\n?/g, "\n");
+      let text = done ? dec.decode() : dec.decode(value, { stream: true });
+      if (heldCr) text = `\r${text}`;
+      heldCr = !done && text.endsWith("\r");
+      if (heldCr) text = text.slice(0, -1);
+      buf += text.replace(/\r\n?/g, "\n");
       let idx: number;
       while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const frame = buf.slice(0, idx);
+        const data = frameData(buf.slice(0, idx));
         buf = buf.slice(idx + 2);
-        const data = frame
-          .split("\n")
-          .filter((l) => l.startsWith("data:"))
-          .map((l) => l.slice(5).replace(/^ /, ""))
-          .join("\n");
         if (!data) continue;
         try {
           yield JSON.parse(data);
@@ -196,6 +253,16 @@ export async function* readSseJson(body: ReadableStream<Uint8Array>, maxFrameByt
         }
       }
       if (buf.length > maxFrameBytes) throw new CcpError(502, "ccp_bad_response", "CCP stream frame too large");
+      if (done) break;
+    }
+    // The stream ended inside a frame: what it holds is a complete event all the same.
+    const data = frameData(buf);
+    if (data) {
+      try {
+        yield JSON.parse(data);
+      } catch {
+        /* not JSON: skipped */
+      }
     }
   } finally {
     reader.cancel().catch(() => {});
