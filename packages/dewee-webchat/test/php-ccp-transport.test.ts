@@ -3,14 +3,14 @@
 // contract next to the TS handler's answers, error mapping and redaction, redirect refusal, timeout
 // abort. Runs when a PHP 8.1+ binary is available (PHP_BIN or `php` on PATH); skipped otherwise.
 import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatStreamEvent } from "../src/protocol";
 import { createDeweeHandler, signVisitorToken, verifyVisitorToken } from "../src/server";
-import { INTEGRATION_ID, INTEGRATION_SECRET, startFakeCcp, startTrap, type FakeCcp } from "./helpers/fake-ccp-ingress";
+import { INTEGRATION_ID, INTEGRATION_SECRET, mintEdge, startFakeCcp, startTrap, type FakeCcp } from "./helpers/fake-ccp-ingress";
 
 const PHP = process.env.PHP_BIN || "php";
 const hasPhp = spawnSync(PHP, ["-v"]).status === 0;
@@ -50,8 +50,10 @@ describe.skipIf(!hasPhp)("PHP ccp transport", () => {
     optionsFile = `options-${++optionsSeq}.json`;
     writeFileSync(join(dir, optionsFile), JSON.stringify({ ccp: ccpOptions(), secret: VISITOR_SECRET, rateLimit: false, ...extra }));
   };
-  /** The integration config is cached for a minute in the temp dir; tests that change it drop the cache. */
-  const dropConfigCache = () => spawnSync("sh", ["-c", `rm -f ${JSON.stringify(dir)}/tmp/dewee-webchat-ccp-config-*`]);
+  /** The integration config is cached for a minute in a private temp dir; tests that change it drop the cache. */
+  const dropConfigCache = () => spawnSync("sh", ["-c", `rm -f ${JSON.stringify(dir)}/tmp/dewee-webchat-*/ccp-config-*`]);
+  /** The private cache directory (`dewee-webchat-<uid>`) the PHP server created, if any. */
+  const cacheDirs = () => readdirSync(join(dir, "tmp")).filter((n) => /^dewee-webchat-\d+$/.test(n)).map((n) => join(dir, "tmp", n));
 
   async function call(path: string, init: RequestInit = {}) {
     const res = await fetch(`${base}${path}`, { ...init, headers: { ...(init.headers as Record<string, string>), "x-test-options": optionsFile } });
@@ -264,6 +266,79 @@ echo json_encode(['token' => $t, 'fromTs' => DeweeWebchat::verifyVisitorToken($i
     ccp.state.edgeTtlSeconds = 3600;
     expect((await chat(s.token, { conversationId: "conv_php_0004" })).status).toBe(200);
     expect(ccp.routes("session").at(-1)?.body).toEqual({ visitor_id: s.visitorId });
+  });
+
+  it("on every fresh request, refreshes a lapsed sealed edge session once at /session and keeps the visitor", async () => {
+    const v = "visitor_php_aged_1";
+    const edge = mintEdge(v, -7200);
+    const token = await signVisitorToken(VISITOR_SECRET, { v, exp: Date.now() + 28 * 86_400_000, es: edge, ese: Date.now() - 7_200_000 });
+    const s = await session({ token });
+    expect(s.visitorId).toBe(v);
+    expect(ccp.routes("session")).toHaveLength(1);
+    expect(ccp.routes("session")[0].headers["x-dewee-webchat-session"]).toBe(edge);
+    const claims = await verifyVisitorToken(VISITOR_SECRET, s.token);
+    expect(claims?.es).not.toBe(edge);
+    // The widget comes back before the new edge session lapses.
+    expect(s.expiresAt).toBeLessThanOrEqual(claims!.ese!);
+    expect(s.expiresIn).toBeGreaterThan(0);
+    expect(s.expiresIn).toBeLessThanOrEqual(3_600_000);
+    for (const id of ["conv_php_0101", "conv_php_0102", "conv_php_0103"]) expect((await chat(s.token, { conversationId: id })).status).toBe(200);
+    expect(ccp.routes("session")).toHaveLength(1);
+    // A fresh one is handed back without a CCP call.
+    const again = await session({ token: s.token });
+    expect([again.visitorId, ccp.routes("session").length]).toEqual([v, 1]);
+  });
+
+  it("opens one new edge session for the same visitor once the old one is past CCP's refresh window", async () => {
+    const v = "visitor_php_aged_2";
+    const token = await signVisitorToken(VISITOR_SECRET, { v, exp: Date.now() + 25 * 86_400_000, es: mintEdge(v, -90_000), ese: Date.now() - 90_000_000 });
+    const s = await session({ token });
+    expect(s.visitorId).toBe(v);
+    expect(ccp.routes("session").map((r) => r.body)).toEqual([{ visitor_id: v }]);
+    await chat(s.token);
+    expect(ccp.routes("session")).toHaveLength(1);
+  });
+
+  it("limits returning visitors per visitor, so visitors behind one address keep the new-visitor budget", async () => {
+    setOptions({ rateLimit: true });
+    const headers = { "x-forwarded-for": "198.51.100.77", "content-type": "application/json" };
+    for (let i = 0; i < 12; i++) {
+      const v = `visitor_php_nat_${String(i).padStart(2, "0")}`;
+      const token = await signVisitorToken(VISITOR_SECRET, { v, exp: Date.now() + 86_400_000, es: mintEdge(v, 3600), ese: Date.now() + 3_600_000 });
+      expect((await call("/session", { method: "POST", headers, body: JSON.stringify({ token }) })).status).toBe(200);
+    }
+    expect((await call("/session", { method: "POST", headers, body: "{}" })).status).toBe(200);
+  });
+
+  it("caches the integration config only in a directory private to this user", async () => {
+    await call("/config");
+    await call("/config");
+    expect(ccp.routes("config")).toHaveLength(1);
+    const [cache] = cacheDirs();
+    expect(cache).toBeDefined();
+    // Opened to others (as another account on a shared host could have created it): not used.
+    chmodSync(cache, 0o777);
+    try {
+      dropConfigCache();
+      ccp.reset();
+      await call("/config");
+      await call("/config");
+      expect(ccp.routes("config")).toHaveLength(2);
+    } finally {
+      chmodSync(cache, 0o700);
+    }
+  });
+
+  it("leaves the legacy gateway transport's /session unchanged", async () => {
+    setOptions({ ccp: undefined, gatewayUrl: "https://gw.example", token: "gw-token", agents: ["shop"] });
+    const s = await session();
+    expect(Object.keys(s).sort()).toEqual(["expiresAt", "token", "visitorId"]);
+    expect(await verifyVisitorToken(VISITOR_SECRET, s.token)).toEqual({ v: s.visitorId, exp: s.expiresAt });
+    expect(s.expiresAt - Date.now()).toBeGreaterThan(29 * 86_400_000);
+    // A returning visitor keeps its id, also from a token a CCP backend issued.
+    const fromCcp = await signVisitorToken(VISITOR_SECRET, { v: "visitor_php_move_1", exp: Date.now() + 60_000, es: mintEdge("visitor_php_move_1", 3600), ese: Date.now() + 3_600_000 });
+    expect((await session({ token: fromCcp })).visitorId).toBe("visitor_php_move_1");
+    expect(ccp.seen).toHaveLength(0);
   });
 
   it("never follows a redirect with the integration secret", async () => {

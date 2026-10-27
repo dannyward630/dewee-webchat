@@ -54,10 +54,15 @@ CCP and gateway variables together are refused: the endpoint answers `500 not_co
 why (`error_log`), so a credential is never sent to an origin you did not choose. The deprecation
 warning of the legacy transport is logged at most once a day.
 
-With CCP, the integration config is cached for 60 s in `sys_get_temp_dir()`. The CCP edge session
-lives in the visitor token (encrypted, same format as the Node handler); PHP keeps no memory between
-requests, so after the edge session's hour each request refreshes it first until the widget gets a
-new token from `/session`. A turn that times out, or whose visitor disconnects (seen at the next
+With CCP, the integration config is cached for 60 s in a directory private to the PHP user,
+`sys_get_temp_dir()/dewee-webchat-<uid>` (created `0700`). If that directory is a link, belongs to
+another user or is open to others (another account on a shared host could have created it), nothing
+is cached and `error_log` says why; a cached file is only read when it is this user's and not
+writable by others. The CCP edge session lives in the visitor token (encrypted, same format as the
+Node handler), because PHP keeps no memory between requests. `/session` reports the edge session's
+end as `expiresAt` (and `expiresIn`), so the widget asks for a new token before it lapses; that
+refresh keeps the visitor and re-seals a refreshed edge session, and chat requests do not refresh or
+open one. A returning visitor's `/session` is rate limited per visitor, a new visitor's per IP. A turn that times out, or whose visitor disconnects (seen at the next
 write, at most 15 s later), is aborted at CCP.
 
 Array options use the TS names (`transport`, `ccp` = `['chatUrl' => …, 'integrationId' => …,

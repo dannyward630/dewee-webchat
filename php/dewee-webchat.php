@@ -82,6 +82,15 @@ final class DeweeWebchat
     private const CCP_CONFIG_TTL = 60;
     /** An edge session this close to expiry (ms) is refreshed before use. */
     private const EDGE_MARGIN_MS = 30_000;
+    /**
+     * `/session` hands out an edge session with at least this long left (ms), refreshing one closer to
+     * its end. The widget comes back once a tenth of the lifetime it was given remains, so the token
+     * it holds always carries an edge session that is still fresh (same rule as the TS handler).
+     */
+    private const EDGE_RESEAL_MS = 900_000;
+    /** Remediation values of the identity contract; anything else from CCP is dropped. */
+    public const REMEDIATION_ACTIONS = ['send_connect_link', 'ask_user_to_dm', 'retry_later', 'contact_admin', 'reauthenticate'];
+    public const REMEDIATION_AUDIENCES = ['end_user', 'operator', 'integrator'];
     /** CCP refreshes an expired edge session for at most this long after its expiry (ms). */
     private const EDGE_REFRESH_WINDOW_MS = 86_400_000;
     private const MIGRATION_GUIDE = 'https://github.com/nextlevelbuilder/dewee-webchat/blob/main/docs/migrating-to-ccp-transport.md';
@@ -402,6 +411,10 @@ final class DeweeWebchat
     private function handleSession(): void
     {
         $ip = $this->clientIp();
+        if ($this->ccp !== null) {
+            $this->handleCcpSession($ip);
+            return;
+        }
         if (!$this->rateLimit($ip, 'session')) {
             $this->fail(429, 'Too many sessions, slow down', 'rate_limited');
             return;
@@ -418,22 +431,52 @@ final class DeweeWebchat
         $previous = isset($body['token']) && is_string($body['token']) ? self::verifyVisitorToken($this->secret, $body['token']) : null;
         $visitorId = $previous['v'] ?? self::randomId(16);
         $expiresAt = self::nowMs() + (int) $this->o['sessionTtlMs'];
-        $claims = ['v' => $visitorId, 'exp' => $expiresAt];
-        if ($this->ccp !== null) {
-            // CCP admits the visitor (its own quotas) before a token is issued.
-            try {
-                $edge = $this->edgeFor($this->visitorContext(), $visitorId, self::sealedEdge($previous));
-            } catch (DeweeCcpError $e) {
-                $this->ccpFail($e, 'session');
-                return;
-            }
-            $claims['es'] = $edge['token'];
-            $claims['ese'] = $edge['expiresAt'];
-        }
         $this->json([
             'visitorId' => $visitorId,
-            'token' => self::signVisitorToken($this->secret, $claims),
+            'token' => self::signVisitorToken($this->secret, ['v' => $visitorId, 'exp' => $expiresAt]),
             'expiresAt' => $expiresAt,
+        ]);
+    }
+
+    /**
+     * CCP `/session`. A returning visitor (a still-valid token) is limited per visitor, so visitors
+     * behind one address do not use up each other's budget; a new one per IP. PHP keeps no memory
+     * between requests, so the edge session lives only in the token: a stale one is refreshed here for
+     * the same visitor, and the widget is told the edge session's end (`expiresAt`, `expiresIn`) so it
+     * comes back for a new token before the next request would have to refresh or create one.
+     */
+    private function handleCcpSession(string $ip): void
+    {
+        $body = $this->readJsonBody() ?? [];
+        $previous = isset($body['token']) && is_string($body['token']) ? self::verifyVisitorToken($this->secret, $body['token']) : null;
+        if (!$this->rateLimit($previous !== null ? "visitor:{$previous['v']}" : $ip, 'session')) {
+            $this->fail(429, 'Too many sessions, slow down', 'rate_limited');
+            return;
+        }
+        if (!empty($this->o['turnstile'])) {
+            $tt = $body['turnstileToken'] ?? null;
+            if (!is_scalar($tt) || (string) $tt === '' || !self::verifyTurnstile((string) $this->o['turnstile']['secretKey'], (string) $tt, $ip)) {
+                $this->fail(403, 'Verification failed', 'turnstile_failed');
+                return;
+            }
+        }
+        $visitorId = $previous['v'] ?? self::randomId(16);
+        $now = self::nowMs();
+        $expiresAt = $now + (int) $this->o['sessionTtlMs'];
+        // CCP admits the visitor (its own quotas) before a token is issued.
+        try {
+            $edge = $this->edgeFor($this->visitorContext(), $visitorId, self::sealedEdge($previous), null, self::EDGE_RESEAL_MS);
+        } catch (DeweeCcpError $e) {
+            $this->ccpFail($e, 'session');
+            return;
+        }
+        $refreshAt = (int) min($expiresAt, $edge['expiresAt']);
+        $this->json([
+            'visitorId' => $visitorId,
+            'token' => self::signVisitorToken($this->secret, ['v' => $visitorId, 'exp' => $expiresAt, 'es' => $edge['token'], 'ese' => $edge['expiresAt']]),
+            'expiresAt' => $refreshAt,
+            // Counted from now, after CCP answered: the edge session's lifetime starts at its receipt.
+            'expiresIn' => max(0, $refreshAt - self::nowMs()),
         ]);
     }
 
@@ -840,8 +883,9 @@ final class DeweeWebchat
     {
         if (is_string($code) && isset(self::IDENTITY_ERRORS[$code])) {
             $ev = ['type' => 'error', 'code' => $code, 'message' => self::IDENTITY_ERRORS[$code][1]];
-            if (is_array($remediation) && is_string($remediation['action'] ?? null) && is_string($remediation['audience'] ?? null)) {
-                $ev['remediation'] = ['action' => $remediation['action'], 'audience' => $remediation['audience']];
+            $known = self::knownRemediation($remediation);
+            if ($known !== null) {
+                $ev['remediation'] = $known;
             }
             return $ev;
         }
@@ -851,6 +895,18 @@ final class DeweeWebchat
             'run_failed' => ['type' => 'error', 'code' => 'run_failed', 'message' => 'The agent could not answer, please try again'],
             default => ['type' => 'error', 'code' => 'gateway_error', 'message' => 'Dewee is unavailable, try again later'],
         };
+    }
+
+    /**
+     * A remediation CCP sent, kept only when both fields are known values of the identity contract.
+     *
+     * @return array{action: string, audience: string}|null
+     */
+    public static function knownRemediation(mixed $r): ?array
+    {
+        return is_array($r) && in_array($r['action'] ?? null, self::REMEDIATION_ACTIONS, true) && in_array($r['audience'] ?? null, self::REMEDIATION_AUDIENCES, true)
+            ? ['action' => $r['action'], 'audience' => $r['audience']]
+            : null;
     }
 
     /** CCP: the visitor's own conversation. An unknown or foreign conversation is empty. @param array{v: string, es?: string, ese?: int|float} $claims */
@@ -941,24 +997,71 @@ final class DeweeWebchat
     private function ccpConfig(): array
     {
         static $memo = [];
-        $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'dewee-webchat-ccp-config-' . substr(hash('sha256', $this->ccp->base), 0, 16) . '.json';
-        if (isset($memo[$file])) {
-            return $memo[$file];
+        $key = substr(hash('sha256', $this->ccp->base), 0, 16);
+        if (isset($memo[$key])) {
+            return $memo[$key];
         }
-        $mtime = @filemtime($file);
-        if ($mtime !== false && $mtime > time() - self::CCP_CONFIG_TTL) {
-            $cached = json_decode((string) @file_get_contents($file), true);
-            if (is_array($cached) && isset($cached['agents'], $cached['defaultAgent'])) {
-                return $memo[$file] = $cached;
+        $dir = self::privateCacheDir();
+        $file = $dir !== null ? $dir . DIRECTORY_SEPARATOR . "ccp-config-{$key}.json" : null;
+        if ($file !== null && self::ownedPrivateFile($file)) {
+            $mtime = @filemtime($file);
+            if ($mtime !== false && $mtime > time() - self::CCP_CONFIG_TTL) {
+                $cached = json_decode((string) @file_get_contents($file), true);
+                if (is_array($cached) && isset($cached['agents'], $cached['defaultAgent'])) {
+                    return $memo[$key] = $cached;
+                }
             }
         }
         $cfg = self::parseCcpConfig($this->ccp->json('config', $this->visitorContext()));
-        $tmp = $file . '.' . bin2hex(random_bytes(4));
-        if (@file_put_contents($tmp, json_encode($cfg, self::JSON_FLAGS), LOCK_EX) !== false) {
-            @chmod($tmp, 0600);
-            @rename($tmp, $file);
+        if ($file !== null) {
+            $tmp = $file . '.' . bin2hex(random_bytes(4));
+            if (@file_put_contents($tmp, json_encode($cfg, self::JSON_FLAGS), LOCK_EX) !== false) {
+                @chmod($tmp, 0600);
+                @rename($tmp, $file);
+            }
         }
-        return $memo[$file] = $cfg;
+        return $memo[$key] = $cfg;
+    }
+
+    /**
+     * A cache directory only this process's user can write: `dewee-webchat-<uid>` in the temp dir,
+     * created 0700. On shared hosting the temp dir is shared, so another account could create the
+     * directory (or plant a config) first: a directory that is a link, not owned by this user or open to
+     * others is not used, and nothing is cached. Null when there is no such directory.
+     */
+    private static function privateCacheDir(): ?string
+    {
+        static $dir = false;
+        if ($dir !== false) {
+            return $dir;
+        }
+        $uid = self::processUid();
+        $d = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "dewee-webchat-{$uid}";
+        if ($uid !== null && !file_exists($d) && !is_link($d)) {
+            @mkdir($d, 0700);
+        }
+        clearstatcache(true, $d);
+        $perms = @fileperms($d);
+        if ($uid === null || is_link($d) || !is_dir($d) || @fileowner($d) !== $uid || $perms === false || ($perms & 0077) !== 0) {
+            error_log('[dewee-webchat] the CCP config cache directory is missing or not private to this user; the config is not cached');
+            return $dir = null;
+        }
+        return $dir = $d;
+    }
+
+    /** A regular file (not a link) owned by this process's user that nobody else can write. */
+    private static function ownedPrivateFile(string $file): bool
+    {
+        clearstatcache(true, $file);
+        $perms = @fileperms($file);
+        return is_file($file) && !is_link($file) && @fileowner($file) === self::processUid() && $perms !== false && ($perms & 0022) === 0;
+    }
+
+    /** The effective uid of this process (posix), else the script owner's. */
+    private static function processUid(): ?int
+    {
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : getmyuid();
+        return is_int($uid) && $uid >= 0 ? $uid : null;
     }
 
     /**
@@ -1052,16 +1155,17 @@ final class DeweeWebchat
     }
 
     /**
-     * A usable edge session: the sealed one while it is fresh, else refreshed, else new.
+     * A usable edge session: the sealed one while it has more than $minRemainingMs left, else
+     * refreshed (while CCP still accepts it), else new.
      *
      * @param array<string, mixed> $ctx
      * @param array{token: string, expiresAt: int|float}|null $sealed
      * @return array{token: string, expiresAt: int|float}
      */
-    private function edgeFor(array $ctx, string $visitorId, ?array $sealed, ?string $force = null): array
+    private function edgeFor(array $ctx, string $visitorId, ?array $sealed, ?string $force = null, int $minRemainingMs = self::EDGE_MARGIN_MS): array
     {
         $now = self::nowMs();
-        if ($force === null && $sealed !== null && $sealed['expiresAt'] - $now > self::EDGE_MARGIN_MS) {
+        if ($force === null && $sealed !== null && $sealed['expiresAt'] - $now > $minRemainingMs) {
             return $sealed;
         }
         if ($force !== 'create' && $sealed !== null && $now - $sealed['expiresAt'] < self::EDGE_REFRESH_WINDOW_MS - self::EDGE_MARGIN_MS) {
@@ -2044,11 +2148,7 @@ final class DeweeCcpClient
                 }
             }
         }
-        $r = $e['remediation'] ?? null;
-        $remediation = is_array($r) && is_string($r['action'] ?? null) && is_string($r['audience'] ?? null)
-            ? ['action' => $r['action'], 'audience' => $r['audience']]
-            : null;
-        return new DeweeCcpError($status, $code, $message, $retry, $remediation);
+        return new DeweeCcpError($status, $code, $message, $retry, DeweeWebchat::knownRemediation($e['remediation'] ?? null));
     }
 
     /**
@@ -2064,28 +2164,35 @@ final class DeweeCcpClient
     {
         stream_set_timeout($fp, 1);
         $buf = '';
+        // A chunk ending in "\r" may be the first half of "\r\n": it is held until the next chunk shows.
+        $heldCr = false;
         while (true) {
             $chunk = fread($fp, 8192);
             if ($chunk === false || $chunk === '') {
-                if (feof($fp) || !$idle()) {
+                if (feof($fp)) {
+                    // The stream ended inside a frame: what it holds is a complete event all the same.
+                    $last = self::sseData($buf);
+                    if ($last !== null) {
+                        yield $last;
+                    }
+                    return;
+                }
+                if (!$idle()) {
                     return;
                 }
                 continue;
             }
-            $buf = str_replace(["\r\n", "\r"], "\n", $buf . $chunk);
+            if ($heldCr) {
+                $chunk = "\r" . $chunk;
+            }
+            $heldCr = str_ends_with($chunk, "\r");
+            if ($heldCr) {
+                $chunk = substr($chunk, 0, -1);
+            }
+            $buf .= str_replace(["\r\n", "\r"], "\n", $chunk);
             while (($idx = strpos($buf, "\n\n")) !== false) {
-                $frame = substr($buf, 0, $idx);
+                $decoded = self::sseData(substr($buf, 0, $idx));
                 $buf = substr($buf, $idx + 2);
-                $data = [];
-                foreach (explode("\n", $frame) as $line) {
-                    if (str_starts_with($line, 'data:')) {
-                        $data[] = (string) preg_replace('/^ /', '', substr($line, 5));
-                    }
-                }
-                if (!$data) {
-                    continue;
-                }
-                $decoded = json_decode(implode("\n", $data), true);
                 if ($decoded !== null) {
                     yield $decoded;
                 }
@@ -2097,6 +2204,18 @@ final class DeweeCcpClient
                 return;
             }
         }
+    }
+
+    /** The decoded JSON of one SSE frame's `data:` lines; null for a comment, an empty or a non-JSON frame. */
+    private static function sseData(string $frame): mixed
+    {
+        $data = [];
+        foreach (explode("\n", $frame) as $line) {
+            if (str_starts_with($line, 'data:')) {
+                $data[] = (string) preg_replace('/^ /', '', substr($line, 5));
+            }
+        }
+        return $data ? json_decode(implode("\n", $data), true) : null;
     }
 }
 
