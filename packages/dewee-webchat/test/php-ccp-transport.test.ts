@@ -234,7 +234,7 @@ echo json_encode(['token' => $t, 'fromTs' => DeweeWebchat::verifyVisitorToken($i
       [403, "agent_not_allowed", 403, "agent_not_allowed"],
       [409, "run_in_progress", 409, "run_in_progress"],
       [413, "message_too_large", 413, "too_long"],
-      [429, "concurrency_limited", 429, "rate_limited"],
+      [429, "concurrency_limited", 429, "RATE_LIMITED"],
       [400, "invalid_request", 400, "bad_request"],
       [500, "internal", 502, "gateway_error"],
       [401, "IDENTITY_REQUIRED", 401, "IDENTITY_REQUIRED"],
@@ -248,6 +248,18 @@ echo json_encode(['token' => $t, 'fromTs' => DeweeWebchat::verifyVisitorToken($i
     ccp.state.failNext.set("chat", { status: 429, code: "rate_limited", retryAfter: 7 });
     const limited = await chat(s.token);
     expect([limited.status, limited.headers.get("retry-after")]).toEqual([429, "7"]);
+    expect(limited.json()).toEqual({ error: { message: "Too many messages, please wait a moment.", code: "RATE_LIMITED", retryAfterMs: 7000 } });
+    // Without a Retry-After the widget still gets a bounded cooldown; a policy refusal is typed, no CCP text.
+    ccp.state.failNext.set("chat", { status: 429, code: "concurrency_limited", message: "cap wid=0193" });
+    const capped = await chat(s.token);
+    expect([capped.status, capped.headers.get("retry-after"), capped.json()]).toEqual([429, "5", { error: { message: "Too many messages, please wait a moment.", code: "RATE_LIMITED", retryAfterMs: 5000 } }]);
+    ccp.state.failNext.set("chat", { status: 403, code: "POLICY_DENIED", message: "blocked by rule 0193" });
+    const denied = await chat(s.token);
+    expect([denied.status, denied.json()]).toEqual([403, { error: { message: "This message can't be sent.", code: "POLICY_DENIED" } }]);
+    // A run CCP rate-limits mid-stream ends with the typed admission event, not CCP's text.
+    const mid = await chat(s.token, { message: "now midlimit" });
+    expect(sse(mid.text).at(-1)).toEqual({ type: "error", code: "RATE_LIMITED", message: "Too many messages, please wait a moment.", retryAfterMs: 5000 });
+    expect(mid.text).not.toMatch(/wid=|runtime\.internal/);
     // A run that fails mid-stream ends with this backend's own message.
     expect(sse((await chat(s.token, { message: "now fail" })).text).at(-1)).toEqual({ type: "error", code: "run_failed", message: "The agent could not answer, please try again" });
     // A wrong or revoked integration secret: typed, redacted.

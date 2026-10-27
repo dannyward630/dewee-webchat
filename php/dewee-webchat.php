@@ -882,15 +882,23 @@ final class DeweeWebchat
                 }
                 return ['type' => 'done', 'content' => is_string($f['content'] ?? null) ? $f['content'] : ''] + ($usage ? ['usage' => $usage] : []);
             case 'error':
-                return self::ccpStreamError($f['code'] ?? null, $f['remediation'] ?? null);
+                $retry = $f['retryAfterMs'] ?? (is_int($f['retry_after_seconds'] ?? null) || is_float($f['retry_after_seconds'] ?? null) ? $f['retry_after_seconds'] * 1000 : null);
+                return self::ccpStreamError($f['code'] ?? null, $f['remediation'] ?? null, $retry);
             default:
                 return null; // unknown frames are dropped
         }
     }
 
     /** The SSE `error` event for a code a run ended with. Messages are this backend's own. @return array<string, mixed> */
-    public static function ccpStreamError(mixed $code, mixed $remediation): array
+    public static function ccpStreamError(mixed $code, mixed $remediation, mixed $retryAfterMs = null): array
     {
+        // Rate and quota refusals during a run are the typed admission refusal, with the widget's cooldown.
+        if ($code === 'rate_limited' || $code === 'concurrency_limited') {
+            return self::admissionErrorEvent('RATE_LIMITED', $retryAfterMs);
+        }
+        if (is_string($code) && in_array($code, self::ADMISSION_ERROR_CODES, true)) {
+            return self::admissionErrorEvent($code, $retryAfterMs);
+        }
         if (is_string($code) && isset(self::IDENTITY_ERRORS[$code])) {
             $ev = ['type' => 'error', 'code' => $code, 'message' => self::IDENTITY_ERRORS[$code][1]];
             $known = self::knownRemediation($remediation);
@@ -901,7 +909,6 @@ final class DeweeWebchat
         }
         return match ($code) {
             'cancelled' => ['type' => 'error', 'code' => 'cancelled', 'message' => 'Cancelled'],
-            'rate_limited', 'concurrency_limited' => ['type' => 'error', 'code' => 'rate_limited', 'message' => 'Too many messages, please wait a moment'],
             'run_failed' => ['type' => 'error', 'code' => 'run_failed', 'message' => 'The agent could not answer, please try again'],
             default => ['type' => 'error', 'code' => 'gateway_error', 'message' => 'Dewee is unavailable, try again later'],
         };
@@ -1222,7 +1229,10 @@ final class DeweeWebchat
      * Maps an ingress error to the browser contract. CCP's message is never forwarded; failures the
      * visitor cannot act on are logged for the operator (without secrets) and answered generically.
      *
-     * @return array{status: int, code: string, message: string, identity?: bool, remediation?: array{action: string, audience: string}, retryAfterSeconds?: int}
+     * A refused message (`chat` only) carries `admission`: it is answered as the legacy gateway's typed
+     * POLICY_DENIED / RATE_LIMITED, with `retryAfterMs` (raw; normalized by admissionErrorEvent).
+     *
+     * @return array{status: int, code: string, message: string, identity?: bool, remediation?: array{action: string, audience: string}, retryAfterSeconds?: int, admission?: string, retryAfterMs?: int|null}
      */
     public static function ccpBrowserError(Throwable $e, string $route): array
     {
@@ -1235,6 +1245,15 @@ final class DeweeWebchat
         if (isset(self::IDENTITY_ERRORS[$e->ccpCode])) {
             [$status, $message, $action] = self::IDENTITY_ERRORS[$e->ccpCode];
             return ['status' => $status, 'code' => $e->ccpCode, 'message' => $message, 'identity' => true, 'remediation' => $e->remediation ?? ['action' => $action, 'audience' => 'end_user']];
+        }
+        $retryAfterMs = $e->retryAfterSeconds ? $e->retryAfterSeconds * 1000 : null;
+        if ($route === 'chat') {
+            if (in_array($e->ccpCode, self::ADMISSION_ERROR_CODES, true)) {
+                return ['status' => $e->ccpCode === 'RATE_LIMITED' ? 429 : 403, 'code' => $e->ccpCode, 'message' => '', 'admission' => $e->ccpCode, 'retryAfterMs' => $retryAfterMs];
+            }
+            if ($e->ccpCode === 'rate_limited' || $e->ccpCode === 'concurrency_limited' || $e->status === 429) {
+                return ['status' => 429, 'code' => 'RATE_LIMITED', 'message' => '', 'admission' => 'RATE_LIMITED', 'retryAfterMs' => $retryAfterMs];
+            }
         }
         $limited = ['status' => 429, 'code' => 'rate_limited', 'message' => 'Too many messages, please wait a moment'] + ($e->retryAfterSeconds ? ['retryAfterSeconds' => $e->retryAfterSeconds] : []);
         switch ($e->ccpCode) {
@@ -1279,6 +1298,15 @@ final class DeweeWebchat
     private function ccpFail(Throwable $e, string $route): void
     {
         $b = self::ccpBrowserError($e, $route);
+        if (isset($b['admission'])) {
+            $event = self::admissionErrorEvent($b['admission'], $b['retryAfterMs'] ?? null);
+            unset($event['type']);
+            if (isset($event['retryAfterMs'])) {
+                header('Retry-After: ' . (int) ceil($event['retryAfterMs'] / 1000));
+            }
+            $this->json(['error' => $event], $b['status']);
+            return;
+        }
         if (!empty($b['retryAfterSeconds'])) {
             header('Retry-After: ' . $b['retryAfterSeconds']);
         }
