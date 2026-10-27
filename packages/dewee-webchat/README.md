@@ -183,8 +183,13 @@ allow their own. A custom `fetch` receives every request as sent, including the 
 signed-in user, so only the trusted host page should supply it.
 
 Anonymous visitor sessions are reused until less than 10% of the token lifetime remains (at most 24 h, at least
-30 s), so backends with short session TTLs do not mint a new session on every request. Signed-in sessions are kept
-in memory only and are refreshed `min(60 s, lifetime / 2)` before they expire.
+30 s), so backends with short session TTLs do not mint a new session on every request. With `transport: "ccp"`,
+`/session` reports the end of the CCP edge session sealed in the token as `expiresAt` (and `expiresIn`), so the
+widget asks `/session` again before it lapses, about once an hour, although the token itself lives 30 days. That
+refresh keeps the visitor id and re-seals a refreshed edge session, so a host that keeps no memory between
+requests (serverless, PHP) never refreshes or opens one while answering a chat. Signed-in sessions are used from
+memory and refreshed `min(60 s, lifetime / 2)` before they expire (see [signed-in users](#signed-in-users) for the
+tab's reuse hint).
 
 ## Agent page actions
 
@@ -258,8 +263,9 @@ session, and Dewee derives the user from it.
 With `transport: "ccp"` the same `identity` option works through CCP: the handler signs the partner
 assertion with `@dewee/identity` and CCP exchanges it for the identity session (`identity/exchange`),
 so the website needs no gateway key. `identity.agent` is optional there (the integration default is
-used), `allowInsecureHttp` does not apply, and logout or a user switch under `rebindEachRequest`
-revokes the old session at CCP. The integration's sign-in mode must allow signed-in users.
+used), `allowInsecureHttp` does not apply, a user switch under `rebindEachRequest` revokes the
+previous user's session at CCP, and logout revokes it through [`handler.revoke`](#signed-in-users).
+The integration's sign-in mode must allow signed-in users.
 
 ```ts
 import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
@@ -316,6 +322,11 @@ How it behaves:
   your subject never reach the browser.
 - One identity session per user is kept in memory and reused until it nears expiry, so a page load
   does not cost an exchange; a session the gateway reports expired or revoked is dropped.
+- With CCP, a host that keeps no memory between requests reuses it too: the widget sends the tab's
+  last signed-in token to `/session` as `verifiedToken`, and the handler reuses its identity session
+  and edge session only when the token was issued by this backend for the user `authenticate` returns
+  now and the same agent, with more than 2 minutes left. It is never extended past its own expiry;
+  anything else is exchanged anew, and it never makes a signed-out visitor signed in.
 - `/chat` and `/history` connect to the gateway with that `identity_session` and no `user_id`, and only
   go on when the gateway confirms it derived a Dewee user (`tuc:…`); a gateway that ignored the session
   (identity switched off) gets `503 SOURCE_UNAVAILABLE` and nothing runs. The same user gets the same
@@ -326,7 +337,23 @@ How it behaves:
   it with a keyed digest of the subject sealed in the token: another user or no user is
   `401 IDENTITY_REQUIRED` (the widget then asks `/session` again), and a throwing `authenticate` is
   `503 SOURCE_UNAVAILABLE`. Turn it on when your login is a cookie: a widget token replayed under
-  another user's cookie is then useless.
+  another user's cookie is then useless. With CCP, another user also revokes the previous user's
+  session at CCP; a request with no user (signed out, or sent without the cookie) is only refused,
+  because the session may still be in use on the user's other devices.
+- Logout: call `revoke` on the handler from your logout route, with the user's subject and the
+  logout request. It forgets the identity sessions the handler holds for that user and, with CCP,
+  revokes them at CCP (`identity/revoke`), so the user's tokens stop working on every device. On a
+  host without shared memory it reaches the sessions this instance holds; the others end when they
+  expire. The legacy gateway has no revoke call, so there it only forgets them.
+
+  ```ts
+  // `handler` from the example above
+  export async function logout(req: Request) {
+    const user = await getUserFromSessionCookie(req.headers.get("cookie"));
+    if (user) await handler.revoke(user.id, req); // the same subject authenticate returns
+    // …then clear your own session cookie
+  }
+  ```
 - Fail closed. If `authenticate` returns `null`, the visitor chats anonymously, exactly as without
   `identity`, unless `required` is set, in which case no session is issued. If it throws, the answer
   is `503 SOURCE_UNAVAILABLE` and no session is issued. If the exchange for a signed-in user fails, no
@@ -346,14 +373,18 @@ How it behaves:
   `PERMISSION_DENIED`, `SOURCE_UNAVAILABLE`, `IDENTITY_CONFLICT`) reach the widget as
   `{ error: { code, remediation } }`. The widget shows its own localized message and, on `LINK_EXPIRED`
   or `LINK_REVOKED`, asks `/session` again.
-- The widget keeps a signed-in session in memory only, so each page load asks your backend who the
-  visitor is. It refreshes the session `min(60 s, lifetime/2)` before it ends, counting the lifetime
+- The widget uses a signed-in session from memory, so each page load asks your backend who the
+  visitor is. With CCP it also keeps the tab's last signed-in token in `sessionStorage` (never
+  `localStorage`) as the reuse hint above, and drops it when `/session` answers anonymously or `401`,
+  or a request with it is refused. It refreshes the session `min(60 s, lifetime/2)` before it ends, counting the lifetime
   (`expiresIn`) from when it received it. Call `chat.renewSession()` after a sign-in or sign-out
   without a page load.
 - Rate limits (default, in memory): 120 `authenticate` calls per IP per minute (checked before
   `authenticate` runs), 30 signed-in `/session` calls per user per 10 minutes, 5 link starts per user per
   10 minutes. A visitor who is not signed in and still has a valid anonymous token gets it back as is;
-  only minting a new one counts against the 10 per IP per 10 minutes. A custom `rateLimit` receives the
+  only minting a new one counts against the 10 per IP per 10 minutes. With CCP, refreshing a
+  returning visitor's token counts per visitor instead, so visitors behind one address do not use up
+  the budget of new ones. A custom `rateLimit` receives the
   buckets `preauth`, `verified` and `link` besides `session` and `chat`.
 - Keep `authenticate` cheap or cached (a signed-cookie check, not a database round trip per call): it
   runs on every `/session`, so on every page load, and with `rebindEachRequest` on every `/chat`,
