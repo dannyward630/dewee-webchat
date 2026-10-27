@@ -330,6 +330,10 @@ How it behaves:
   minutes left. It is never extended past its own expiry; anything else is exchanged anew, and it
   never makes a signed-out visitor signed in. The legacy gateway and PHP send no hint, and the widget
   then stores nothing.
+- The hint lives in one tab, so on a host that keeps no memory between requests each new tab of a
+  signed-in user costs one identity exchange, and CCP allows 10 exchanges per visitor per 10 minutes.
+  Sites where users open many tabs should run the handler where its in-memory session cache survives
+  between requests (a long-lived process or reused instance), which serves every tab of the user.
 - `/chat` and `/history` connect to the gateway with that `identity_session` and no `user_id`, and only
   go on when the gateway confirms it derived a Dewee user (`tuc:…`); a gateway that ignored the session
   (identity switched off) gets `503 SOURCE_UNAVAILABLE` and nothing runs. The same user gets the same

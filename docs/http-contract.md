@@ -55,6 +55,10 @@ request and the gateway message are exactly as before.
 `conversationId` matches `^[A-Za-z0-9_-]{6,64}$`; when missing or invalid the server picks one and
 announces it in the `start` event.
 
+> **Transport `ccp` only (additive).** `agent` (here and on `/history`) must be a key the ingress accepts,
+> `^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$` (up to 100 characters, no `:`); any other value is
+> `400 bad_request` and CCP is not asked.
+
 Each SSE frame is `data: <json>\n\n`; `: ping` comments keep the connection alive. Events:
 
 | `type`        | Fields                                   |
@@ -89,8 +93,8 @@ codes are JSON errors: `403 POLICY_DENIED`, `429 RATE_LIMITED` with `error.retry
 > **Transport `ccp`.** CCP's refusals of a message are these same admission errors, with the same fixed
 > messages. A `/chat` that CCP answers `429` (`rate_limited` or `concurrency_limited`) is
 > `429 RATE_LIMITED` with `retryAfterMs` from CCP's `Retry-After` (5000 when absent), a run CCP
-> rate-limits mid-stream ends with the `RATE_LIMITED` event, and a `POLICY_DENIED` from CCP is passed on
-> typed. CCP's `403` reasons (disabled integration, agent or origin not allowed) are not message policy and
+> rate-limits mid-stream ends with the `RATE_LIMITED` event, and a `POLICY_DENIED` is passed on typed if
+> CCP sends one (it currently does not). CCP's `403` reasons (disabled integration, agent or origin not allowed) are not message policy and
 > keep their own codes; a rate refusal at `/session` stays `429 rate_limited`.
 
 The gateway owns the shared message limit across every backend replica. The backend's own limiter (in
@@ -260,6 +264,10 @@ the backend's log. Other exchange failures are `502 gateway_error` or `429 rate_
 Web-first linking of a chat account for a signed-in user. Headers: `Authorization: Bearer <visitor
 token with ids>`. Body: `{ "idempotencyKey"?: string }` (1 to 255 printable ASCII characters). The
 backend calls `POST {gateway}/v1/identity/links` with the identity session and answers:
+
+> **Transport `ccp` only (additive).** The ingress accepts narrower keys (8 to 128 of `[A-Za-z0-9._:-]`),
+> so the backend sends `base64url(SHA-256(idempotencyKey))` instead: every key above works, the same key
+> is still the same request, and two keys stay distinct.
 
 ```json
 { "proofCode": "482913", "expiresAt": 1791621449203,
