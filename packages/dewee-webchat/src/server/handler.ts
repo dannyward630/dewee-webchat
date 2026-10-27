@@ -332,7 +332,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
         visitorOrigin = undefined;
       }
     }
-    return { visitorOrigin: visitorOrigin === "null" ? undefined : visitorOrigin, visitorIp: ip === "unknown" ? undefined : ip.slice(0, 64), requestId: `dwc-${randomId(12)}` };
+    return { visitorOrigin: visitorOrigin === "null" ? undefined : visitorOrigin, visitorIp: ip === "unknown" ? undefined : ip, requestId: `dwc-${randomId(12)}` };
   }
 
   const sealedEdge = (claims: VisitorClaims | null | undefined): EdgeSession | undefined =>
@@ -1205,7 +1205,10 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
       if (req.method === "POST" && action === "link" && idn) return await handleLink(req);
       return fail(req, 404, "Not found", "not_found");
     } catch (e) {
-      return fail(req, 500, (e as Error).message || "Internal error", "internal");
+      if (!ccp) return fail(req, 500, (e as Error).message || "Internal error", "internal");
+      // CCP: the browser gets no detail, and the log only a CCP error's code (never CCP's text).
+      console.error("[dewee-webchat] internal error:", e instanceof CcpError ? e.code : e);
+      return fail(req, 500, "Internal error", "internal");
     }
   };
   return Object.assign(deweeHandler, { revoke });

@@ -117,6 +117,9 @@ export class CcpError extends Error {
   }
 }
 
+/** `X-Dewee-Visitor-IP` as CCP accepts it (contract): an IPv4 or IPv6 literal. */
+const VISITOR_IP_RE = /^[0-9A-Fa-f:.]{2,64}$/;
+
 export interface CcpRequest {
   method?: "GET" | "POST";
   body?: unknown;
@@ -154,7 +157,8 @@ export class CcpClient {
     if (req.body !== undefined) headers["content-type"] = "application/json";
     if (req.session) headers["x-dewee-webchat-session"] = req.session;
     if (req.visitorOrigin) headers["x-dewee-visitor-origin"] = req.visitorOrigin;
-    if (req.visitorIp) headers["x-dewee-visitor-ip"] = req.visitorIp;
+    // CCP's own format for the address; anything else (a forged X-Forwarded-For) is left out.
+    if (req.visitorIp && VISITOR_IP_RE.test(req.visitorIp)) headers["x-dewee-visitor-ip"] = req.visitorIp;
     if (req.requestId) headers["x-request-id"] = req.requestId;
     if (req.idempotencyKey) headers["idempotency-key"] = req.idempotencyKey;
     let res: Response;
