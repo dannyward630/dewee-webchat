@@ -40,6 +40,13 @@ export interface VisitorClaims {
    * together with `ids`, so the browser never sees the subject or its digest.
    */
   sub?: string;
+  /**
+   * CCP transport only: the CCP edge session token (`dws1.…`). In the signed token it is encrypted
+   * (AES-256-GCM, its own key label), so the browser never holds the raw value.
+   */
+  es?: string;
+  /** CCP transport only: expiry of `es` as CCP reported it, epoch ms on this server's clock. */
+  ese?: number;
 }
 
 /** Longest identity session token the gateway issues (matches the `@dewee/identity` limit). */
@@ -54,25 +61,58 @@ const MAX_SEALED_PLAINTEXT = '{"t":"","h":""}'.length + 6 * MAX_IDENTITY_SESSION
 const MAX_SEALED_LENGTH = Math.ceil(((12 + MAX_SEALED_PLAINTEXT + 16) * 4) / 3);
 const AGENT_CLAIM_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
+/** Longest CCP edge session token accepted for sealing (a `dws1.` token is about 200 characters). */
+const MAX_EDGE_SESSION_LENGTH = 1024;
+/** Longest sealed edge session: 12-byte IV + `{"t":"…"}` (6 bytes per character at worst) + 16-byte tag, base64url. */
+const MAX_SEALED_EDGE_LENGTH = Math.ceil(((12 + '{"t":""}'.length + 6 * MAX_EDGE_SESSION_LENGTH + 16) * 4) / 3);
+
+const IDENTITY_SEAL_INFO = "dewee-webchat:identity-session:aes-256-gcm:v1";
+const EDGE_SEAL_INFO = "dewee-webchat:edge-session:aes-256-gcm:v1";
+
 const sealKeyCache = new Map<string, Promise<CryptoKey>>();
-/** AES-256-GCM key for identity sessions, derived from the visitor secret with its own HKDF label. */
-function sealKey(secret: string): Promise<CryptoKey> {
-  let k = sealKeyCache.get(secret);
+/** AES-256-GCM key derived from the visitor secret with HKDF; each sealed claim has its own label. */
+function sealKey(secret: string, info: string = IDENTITY_SEAL_INFO): Promise<CryptoKey> {
+  const id = `${info}\n${secret}`;
+  let k = sealKeyCache.get(id);
   if (!k) {
     k = crypto.subtle
       .importKey("raw", enc.encode(secret), "HKDF", false, ["deriveKey"])
       .then((base) =>
         crypto.subtle.deriveKey(
-          { name: "HKDF", hash: "SHA-256", salt: enc.encode("dewee-webchat"), info: enc.encode("dewee-webchat:identity-session:aes-256-gcm:v1") },
+          { name: "HKDF", hash: "SHA-256", salt: enc.encode("dewee-webchat"), info: enc.encode(info) },
           base,
           { name: "AES-GCM", length: 256 },
           false,
           ["encrypt", "decrypt"],
         ),
       );
-    sealKeyCache.set(secret, k);
+    sealKeyCache.set(id, k);
   }
   return k;
+}
+
+/** The edge session ciphertext is bound to the visitor it was issued for. */
+const edgeAad = (v: string) => enc.encode(`dewee-webchat:es:${v}`);
+
+async function sealEdgeSession(secret: string, v: string, token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: edgeAad(v) }, await sealKey(secret, EDGE_SEAL_INFO), enc.encode(JSON.stringify({ t: token }))));
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv);
+  out.set(ct, iv.length);
+  return b64url(out);
+}
+
+async function openEdgeSession(secret: string, v: string, sealed: string): Promise<string | null> {
+  const raw = fromB64url(sealed);
+  if (raw.length <= 12 + 16) return null;
+  try {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: edgeAad(v) }, await sealKey(secret, EDGE_SEAL_INFO), raw.slice(12));
+    const parsed = JSON.parse(new TextDecoder().decode(pt)) as { t?: unknown };
+    return typeof parsed?.t === "string" && parsed.t !== "" && parsed.t.length <= MAX_EDGE_SESSION_LENGTH ? parsed.t : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The ciphertext is bound to the visitor and agent it was issued for. */
@@ -125,6 +165,11 @@ export async function signVisitorToken(secret: string, claims: VisitorClaims): P
     const { sub, ...rest } = claims;
     wire = { ...rest, ids: await sealIdentitySession(secret, claims.v, claims.ida, sub ? { t: claims.ids, h: sub } : { t: claims.ids }) };
   }
+  if (claims.es !== undefined) {
+    if (typeof claims.es !== "string" || claims.es === "" || claims.es.length > MAX_EDGE_SESSION_LENGTH) throw new Error("edge session token is empty or too long");
+    if (typeof claims.ese !== "number" || !Number.isFinite(claims.ese)) throw new Error("edge session expiry is required");
+    wire = { ...wire, es: await sealEdgeSession(secret, claims.v, claims.es) };
+  }
   const body = b64url(enc.encode(JSON.stringify(wire)));
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(body)));
   return `${body}.${b64url(sig)}`;
@@ -139,6 +184,15 @@ export async function verifyVisitorToken(secret: string, token: string): Promise
     const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims;
     if (typeof claims.v !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(claims.v)) return null;
     if (typeof claims.exp !== "number" || claims.exp < Date.now()) return null;
+    // An edge session claim is all or nothing too: the sealed token always travels with its expiry.
+    let edge: Pick<VisitorClaims, "es" | "ese"> = {};
+    if (claims.es !== undefined || claims.ese !== undefined) {
+      if (typeof claims.es !== "string" || claims.es === "" || claims.es.length > MAX_SEALED_EDGE_LENGTH) return null;
+      if (typeof claims.ese !== "number" || !Number.isFinite(claims.ese)) return null;
+      const es = await openEdgeSession(secret, claims.v, claims.es);
+      if (!es) return null;
+      edge = { es, ese: claims.ese };
+    }
     // An identity claim is all or nothing: a session token always travels with the agent it is bound to.
     if (claims.ids !== undefined || claims.ida !== undefined) {
       if (typeof claims.ids !== "string" || claims.ids === "" || claims.ids.length > MAX_SEALED_LENGTH) return null;
@@ -146,9 +200,11 @@ export async function verifyVisitorToken(secret: string, token: string): Promise
       if ((claims as { sub?: unknown }).sub !== undefined) return null; // the digest only ever travels sealed
       const opened = await openIdentitySession(secret, claims.v, claims.ida, claims.ids);
       if (!opened) return null;
-      return opened.h ? { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, sub: opened.h } : { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida };
+      return opened.h
+        ? { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, sub: opened.h, ...edge }
+        : { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, ...edge };
     }
-    return claims;
+    return claims.es !== undefined ? { v: claims.v, exp: claims.exp, ...edge } : claims;
   } catch {
     return null;
   }

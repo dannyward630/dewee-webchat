@@ -5,9 +5,9 @@
 //   import { createDeweeHandler } from "dewee-webchat/server";
 //   import { deweeIdentitySdk } from "dewee-webchat/server/identity";
 //   createDeweeHandler({ ..., identity: { sdk: deweeIdentitySdk, authenticate, appId, issuer, assertionSecret } });
-import { exchangeSession, startLink } from "@dewee/identity";
+import { createAssertion, exchangeSession, startLink } from "@dewee/identity";
 import type { DeweeIdentitySdk } from "./handler";
 
-export const deweeIdentitySdk: DeweeIdentitySdk = { exchangeSession, startLink };
+export const deweeIdentitySdk: DeweeIdentitySdk = { exchangeSession, startLink, createAssertion };
 
 export type { DeweeIdentitySdk } from "./handler";
