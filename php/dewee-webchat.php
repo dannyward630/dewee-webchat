@@ -72,6 +72,8 @@ final class DeweeWebchat
 
     private const ID_RE = '/^[A-Za-z0-9_-]{6,64}$/';
     private const AGENT_RE = '/^[A-Za-z0-9_.:-]{1,64}$/';
+    /** Agent keys as the CCP ingress accepts them: up to 100 characters, an alphanumeric first, no `:`. */
+    private const CCP_AGENT_RE = '/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/D';
     private const VISITOR_RE = '/^[A-Za-z0-9_-]{8,64}$/';
     private const JSON_FLAGS = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE;
     private const RATE_LIMITS = ['chat' => [20, 60_000], 'session' => [10, 600_000]];
@@ -519,6 +521,10 @@ final class DeweeWebchat
         // CCP accepts 8 to 64 characters; a shorter id the browser chose counts as invalid and is replaced.
         $conversationId = is_string($cid) && preg_match($this->ccp !== null ? self::CCP_ID_RE : self::ID_RE, $cid) ? $cid : self::randomId(9);
         $requested = $body['agent'] ?? null;
+        if ($this->ccp !== null && self::ccpAgentFor($requested) === null) {
+            $this->fail(400, 'Invalid agent');
+            return;
+        }
         $agent = $this->ccp !== null
             ? self::ccpAgentFor($requested)
             : $this->pickAgent(is_string($requested) ? $requested : null, $creds, $isByo);
@@ -700,14 +706,14 @@ final class DeweeWebchat
 
     /**
      * CCP: the agent a request names is forwarded for CCP to authorize against the integration's set.
-     * "" = the integration default; null = not a valid agent key.
+     * "" = the integration default; null = not an agent key CCP accepts (refused here with 400).
      */
     private static function ccpAgentFor(mixed $requested): ?string
     {
         if ($requested === null || $requested === '') {
             return '';
         }
-        return is_string($requested) && preg_match(self::AGENT_RE, $requested) ? $requested : null;
+        return is_string($requested) && preg_match(self::CCP_AGENT_RE, $requested) ? $requested : null;
     }
 
     /**
@@ -781,7 +787,7 @@ final class DeweeWebchat
         $runId = null;
         $start = function (?array $f) use ($emit, $conversationId, $agent, $cfg, $actionsHash, &$started, &$runId): bool {
             $started = true;
-            $a = is_string($f['agent'] ?? null) && preg_match(self::AGENT_RE, $f['agent']) ? $f['agent'] : ($agent !== '' ? $agent : $cfg['defaultAgent']);
+            $a = is_string($f['agent'] ?? null) && preg_match(self::CCP_AGENT_RE, $f['agent']) ? $f['agent'] : ($agent !== '' ? $agent : $cfg['defaultAgent']);
             $runId = is_string($f['runId'] ?? null) && strlen($f['runId']) <= 128 ? $f['runId'] : null;
             return $emit(['type' => 'start', 'conversationId' => $conversationId, 'agent' => $a, 'runId' => $runId, 'actionsHash' => $actionsHash]);
         };
@@ -936,7 +942,7 @@ final class DeweeWebchat
         }
         $agent = self::ccpAgentFor($_GET['agent'] ?? null);
         if ($agent === null) {
-            $this->fail(403, 'Agent not allowed', 'agent_not_allowed');
+            $this->fail(400, 'Invalid agent');
             return;
         }
         // A browser-valid id CCP cannot hold has no conversation yet.
@@ -1090,7 +1096,7 @@ final class DeweeWebchat
         $agents = [];
         foreach (array_slice(is_array($data['agents'] ?? null) ? array_values($data['agents']) : [], 0, 50) as $a) {
             $key = is_array($a) ? ($a['key'] ?? null) : null;
-            if (!is_string($key) || !preg_match(self::AGENT_RE, $key) || in_array($key, array_column($agents, 'id'), true)) {
+            if (!is_string($key) || !preg_match(self::CCP_AGENT_RE, $key) || in_array($key, array_column($agents, 'id'), true)) {
                 continue;
             }
             $agent = ['id' => $key];

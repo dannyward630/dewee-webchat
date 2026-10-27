@@ -213,6 +213,20 @@ echo json_encode(['token' => $t, 'fromTs' => DeweeWebchat::verifyVisitorToken($i
     expect((await call(`/history?conversationId=short1`, { headers: { authorization: `Bearer ${s.token}` } })).json()).toEqual({ messages: [] });
   });
 
+  it("refuses an agent name the ingress would not accept locally, without asking CCP", async () => {
+    const s = await session();
+    const before = { chat: ccp.routes("chat").length, history: ccp.routes("history").length };
+    for (const agent of ["../../tenant", "agent:shop", "-shop", "a".repeat(101), "shop\n"]) {
+      const r = await chat(s.token, { agent });
+      expect([agent, r.status, r.json().error.code]).toEqual([agent, 400, "bad_request"]);
+      const h = await call(`/history?agent=${encodeURIComponent(agent)}&conversationId=conv_php_0001`, { headers: { authorization: `Bearer ${s.token}` } });
+      expect(h.status).toBe(400);
+    }
+    expect([ccp.routes("chat").length, ccp.routes("history").length]).toEqual([before.chat, before.history]);
+    expect((await chat(s.token, { agent: "a".repeat(100) })).status).toBe(403); // reaches CCP, which decides
+    expect(ccp.routes("chat")).toHaveLength(before.chat + 1);
+  });
+
   it("shows reasoning and tool names only when the integration does, never tool arguments", async () => {
     const s = await session();
     ccp.state.leaky = true;
