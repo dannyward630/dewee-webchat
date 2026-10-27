@@ -1,4 +1,4 @@
-import type { IdentityErrorCode, LinkErrorCode } from "../protocol";
+import type { AdmissionErrorCode, IdentityErrorCode, LinkErrorCode } from "../protocol";
 
 export interface Strings {
   title: string;
@@ -30,6 +30,13 @@ export interface Strings {
   actionLimit: (n: number) => string;
   /** Shown for the typed identity errors of a signed-in chat. */
   identityErrors: Record<IdentityErrorCode, string>;
+  /** Shown when the gateway refuses a message (policy, rate limit, reserved challenge). */
+  admissionErrors: Record<AdmissionErrorCode, string>;
+  /** Visible countdown while sending is paused after a rate limit. */
+  cooldown: (seconds: number) => string;
+  /** Announced (aria-live) when the pause starts and when it ends. */
+  cooldownStart: (seconds: number) => string;
+  cooldownOver: string;
   /** Shown when starting a link fails for a reason other than an identity error. */
   linkErrors: Record<LinkErrorCode, string>;
   linkIntro: string;
@@ -75,6 +82,14 @@ const en: Strings = {
     PERMISSION_DENIED: "You don't have access to this.",
     SOURCE_UNAVAILABLE: "We couldn't check your sign-in right now. Please try again shortly.",
   },
+  admissionErrors: {
+    POLICY_DENIED: "This message can't be sent. Try shortening or rephrasing it.",
+    RATE_LIMITED: "You're sending messages too quickly.",
+    CHALLENGE_REQUIRED: "Extra verification is needed. Please try again later.",
+  },
+  cooldown: (s) => `You can send again in ${s}s`,
+  cooldownStart: (s) => `Sending is paused. You can send again in ${s} second${s === 1 ? "" : "s"}.`,
+  cooldownOver: "You can send messages again.",
   linkErrors: {
     idempotency_key_reused: "This link request was already used. Please try again.",
     link_in_progress: "A link is already in progress. Use the code you got, or wait for it to expire.",
@@ -123,6 +138,14 @@ const vi: Strings = {
     PERMISSION_DENIED: "Bạn không có quyền thực hiện việc này.",
     SOURCE_UNAVAILABLE: "Hiện chưa kiểm tra được đăng nhập của bạn. Bạn thử lại sau ít phút nhé.",
   },
+  admissionErrors: {
+    POLICY_DENIED: "Không gửi được tin nhắn này. Bạn thử rút gọn hoặc diễn đạt lại nhé.",
+    RATE_LIMITED: "Bạn đang gửi tin nhắn hơi nhanh.",
+    CHALLENGE_REQUIRED: "Cần xác minh thêm. Bạn thử lại sau nhé.",
+  },
+  cooldown: (s) => `Bạn có thể gửi lại sau ${s} giây`,
+  cooldownStart: (s) => `Tạm dừng gửi tin nhắn. Bạn có thể gửi lại sau ${s} giây.`,
+  cooldownOver: "Bạn có thể gửi tin nhắn tiếp rồi.",
   linkErrors: {
     idempotency_key_reused: "Yêu cầu liên kết này đã được dùng. Bạn thử lại nhé.",
     link_in_progress: "Đang có một liên kết chưa hoàn tất. Hãy dùng mã đã nhận hoặc chờ mã hết hạn.",

@@ -1,8 +1,9 @@
 // Minimal Dewee gateway WebSocket RPC client (protocol v3).
 // Runs on Cloudflare Workers (fetch upgrade) and on any runtime with a global WebSocket
 // (Node >= 22, Bun, Deno, Workers with the WebSocket constructor).
-import type { AgentInfo, ChatStreamEvent, HistoryMessage, Remediation, ToolCallView } from "../protocol";
+import { isAdmissionErrorCode, type AgentInfo, type ChatStreamEvent, type HistoryMessage, type Remediation, type ToolCallView } from "../protocol";
 import { stripPageBlock } from "../actions/page-block";
+import { admissionErrorEvent } from "./admission-errors";
 
 export interface GatewayCredentials {
   /** Gateway runtime origin, e.g. https://gateway.example.com */
@@ -24,7 +25,7 @@ interface Frame {
   id?: string;
   ok?: boolean;
   payload?: any;
-  error?: { code?: string; message?: string; details?: { remediation?: unknown } };
+  error?: { code?: string; message?: string; retryable?: boolean; retryAfterMs?: unknown; details?: { remediation?: unknown } };
   event?: string;
 }
 
@@ -35,7 +36,8 @@ type SocketLike = {
 };
 
 export class GatewayError extends Error {
-  constructor(message: string, public code?: string, public remediation?: Remediation) {
+  /** `retryAfterMs` is the gateway's raw value for retryable refusals (`RATE_LIMITED`), unvalidated. */
+  constructor(message: string, public code?: string, public remediation?: Remediation, public retryAfterMs?: unknown) {
     super(message);
   }
 }
@@ -144,7 +146,10 @@ export class GatewayConnection {
       const p = this.pending.get(frame.id)!;
       this.pending.delete(frame.id);
       if (frame.ok) p.resolve(frame.payload);
-      else p.reject(new GatewayError(frame.error?.message || "Gateway request failed", frame.error?.code, parseRemediation(frame.error?.details?.remediation)));
+      else {
+        const e = frame.error;
+        p.reject(new GatewayError(e?.message || "Gateway request failed", e?.code, parseRemediation(e?.details?.remediation), e?.retryAfterMs));
+      }
     } else if (frame.type === "event" && frame.event) {
       for (const cb of this.listeners) cb(frame.event, frame.payload);
     }
@@ -217,7 +222,9 @@ export async function* streamChat(opts: StreamChatOptions): AsyncGenerator<ChatS
     .call("chat.send", { agentId: opts.agent, sessionKey: opts.sessionKey, message: opts.message, stream: true }, opts.timeoutMs ?? 180000)
     .then((res) => { push({ type: "done", content: res?.content ?? "", usage: res?.usage }); end(); })
     .catch((err: GatewayError) => {
-      if (!finished) push(err.remediation ? { type: "error", message: err.message, code: err.code, remediation: err.remediation } : { type: "error", message: err.message, code: err.code });
+      // Admission refusals get a fixed message: the gateway's text never reaches the browser.
+      if (!finished && isAdmissionErrorCode(err.code)) push(admissionErrorEvent(err.code, err.retryAfterMs, err.message));
+      else if (!finished) push(err.remediation ? { type: "error", message: err.message, code: err.code, remediation: err.remediation } : { type: "error", message: err.message, code: err.code });
       end();
     });
 

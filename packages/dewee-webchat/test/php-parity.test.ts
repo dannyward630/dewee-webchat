@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { admissionErrorEvent } from "../src/server/admission-errors";
 import { ActionInputError, buildPageBlock, hashManifest, normalizeManifest, serializePageContext, stripPageBlock } from "../src/actions/page-block";
 
 const PHP = process.env.PHP_BIN || "php";
@@ -69,5 +70,39 @@ describe.skipIf(!hasPhp)("PHP backend parity (page actions)", () => {
     expect(php).toEqual(ts);
     expect(ts[1].block).toContain("Page actions unchanged");
     expect(ts[2].stripped).toBe("hello");
+  });
+});
+
+const admissionScript = `<?php
+require ${JSON.stringify(phpFile)};
+$cases = json_decode(stream_get_contents(STDIN), false);
+$out = [];
+foreach ($cases as $c) {
+  $out[] = DeweeWebchat::gatewayErrorEvent(new DeweeGatewayError('gateway text', $c->code, $c->retryAfterMs ?? null));
+}
+echo json_encode($out, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+`;
+
+describe.skipIf(!hasPhp)("PHP backend parity (admission errors)", () => {
+  it("maps POLICY_DENIED, RATE_LIMITED and CHALLENGE_REQUIRED like the TypeScript handler", () => {
+    const cases = [
+      { code: "POLICY_DENIED", retryAfterMs: 5000 },
+      { code: "RATE_LIMITED", retryAfterMs: 1234.2 },
+      { code: "RATE_LIMITED", retryAfterMs: "2500" },
+      { code: "RATE_LIMITED" },
+      { code: "RATE_LIMITED", retryAfterMs: -1 },
+      { code: "RATE_LIMITED", retryAfterMs: 1e9 },
+      { code: "RATE_LIMITED", retryAfterMs: "soon" },
+      { code: "RATE_LIMITED", retryAfterMs: "0x10" },
+      { code: "RATE_LIMITED", retryAfterMs: " 1.5e3 " },
+      { code: "CHALLENGE_REQUIRED", retryAfterMs: 10 },
+    ] as const;
+    const dir = mkdtempSync(join(tmpdir(), "dewee-php-"));
+    writeFileSync(join(dir, "admission.php"), admissionScript);
+    const php = JSON.parse(execFileSync(PHP, [join(dir, "admission.php")], { input: JSON.stringify(cases) }).toString());
+    expect(php).toEqual(cases.map((c) => admissionErrorEvent(c.code, "retryAfterMs" in c ? c.retryAfterMs : undefined)));
+    // anything else keeps the gateway's code and message
+    const other = JSON.parse(execFileSync(PHP, [join(dir, "admission.php")], { input: JSON.stringify([{ code: "run_failed" }]) }).toString());
+    expect(other).toEqual([{ type: "error", message: "gateway text", code: "run_failed" }]);
   });
 });

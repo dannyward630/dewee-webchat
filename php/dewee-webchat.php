@@ -15,7 +15,8 @@ declare(strict_types=1);
 
 final class DeweeGatewayError extends RuntimeException
 {
-    public function __construct(string $message, public readonly ?string $gatewayCode = null)
+    /** $retryAfterMs is the gateway's raw value for retryable refusals (RATE_LIMITED), unvalidated. */
+    public function __construct(string $message, public readonly ?string $gatewayCode = null, public readonly mixed $retryAfterMs = null)
     {
         parent::__construct($message);
     }
@@ -359,12 +360,13 @@ final class DeweeWebchat
         $errMsg = null;
         try {
             $emit(['type' => 'start', 'conversationId' => $conversationId, 'agent' => $agent, 'actionsHash' => $actionsHash]);
-            $observe = static function (array $e) use ($emit, &$reply, &$errMsg): bool {
+            // $reason: the gateway's own text of a refusal, for onChat only (never sent to the browser).
+            $observe = static function (array $e, ?string $reason = null) use ($emit, &$reply, &$errMsg): bool {
                 if ($e['type'] === 'done') {
                     $reply = (string) $e['content'];
                 }
                 if ($e['type'] === 'error') {
-                    $errMsg = (string) $e['message'];
+                    $errMsg = $reason ?? (string) $e['message'];
                 }
                 return $emit($e);
             };
@@ -379,8 +381,12 @@ final class DeweeWebchat
                 $idle,
             );
         } catch (Throwable $e) {
+            // A refused connect is still an admission refusal.
+            $event = $e instanceof DeweeGatewayError && in_array($e->gatewayCode, self::ADMISSION_ERROR_CODES, true)
+                ? self::gatewayErrorEvent($e)
+                : ['type' => 'error', 'message' => $e->getMessage(), 'code' => 'gateway_error'];
             $errMsg = $e->getMessage();
-            $emit(['type' => 'error', 'message' => $errMsg, 'code' => 'gateway_error']);
+            $emit($event);
         } finally {
             if (isset($this->o['onChat']) && is_callable($this->o['onChat'])) {
                 try {
@@ -1008,6 +1014,41 @@ final class DeweeWebchat
         return (int) floor(microtime(true) * 1000);
     }
 
+    /** Admission refusals of chat.send. Mirrors protocol.ts and admission-errors.ts. */
+    public const ADMISSION_ERROR_CODES = ['POLICY_DENIED', 'RATE_LIMITED', 'CHALLENGE_REQUIRED'];
+    public const DEFAULT_RETRY_AFTER_MS = 5000;
+    public const MAX_RETRY_AFTER_MS = 600000;
+
+    /**
+     * SSE error event of an admission refusal, with a fixed message (the gateway's text never reaches the
+     * browser). Only RATE_LIMITED carries retryAfterMs. CHALLENGE_REQUIRED is reserved: no payload yet.
+     *
+     * @return array{type: string, message: string, code: string, retryAfterMs?: int}
+     */
+    public static function admissionErrorEvent(string $code, mixed $retryAfterMs = null): array
+    {
+        $messages = [
+            'POLICY_DENIED' => "This message can't be sent.",
+            'RATE_LIMITED' => 'Too many messages, please wait a moment.',
+            'CHALLENGE_REQUIRED' => 'Verification is required to continue.',
+        ];
+        $event = ['type' => 'error', 'message' => $messages[$code], 'code' => $code];
+        if ($code === 'RATE_LIMITED') {
+            $n = is_int($retryAfterMs) || is_float($retryAfterMs) ? (float) $retryAfterMs
+                : (is_string($retryAfterMs) && trim($retryAfterMs) !== '' && is_numeric(trim($retryAfterMs)) ? (float) trim($retryAfterMs) : NAN);
+            $event['retryAfterMs'] = is_finite($n) && $n > 0 ? (int) min(ceil($n), self::MAX_RETRY_AFTER_MS) : self::DEFAULT_RETRY_AFTER_MS;
+        }
+        return $event;
+    }
+
+    /** SSE error event of a failed gateway request: admission refusals typed, anything else as reported. */
+    public static function gatewayErrorEvent(DeweeGatewayError $e): array
+    {
+        return in_array($e->gatewayCode, self::ADMISSION_ERROR_CODES, true)
+            ? self::admissionErrorEvent($e->gatewayCode, $e->retryAfterMs)
+            : ['type' => 'error', 'message' => $e->getMessage(), 'code' => $e->gatewayCode];
+    }
+
     /** Drops null values (JSON.stringify omits undefined). */
     public static function withoutNulls(array $a): array
     {
@@ -1140,6 +1181,7 @@ final class DeweeGatewayConnection
         throw new DeweeGatewayError(
             is_string($err->message ?? null) && $err->message !== '' ? $err->message : 'Gateway request failed',
             isset($err->code) && is_scalar($err->code) ? (string) $err->code : null,
+            $err->retryAfterMs ?? null,
         );
     }
 
@@ -1153,7 +1195,7 @@ final class DeweeGatewayConnection
      * $emit and $idle return false when the visitor disconnected; the run is then aborted.
      *
      * @param array{url: string, token: string, tenantId?: string} $creds
-     * @param callable(array<string, mixed>): bool $emit
+     * @param callable(array<string, mixed>, ?string=): bool $emit second argument: the gateway's text of a refusal, for onChat only
      * @param callable(): bool $idle
      */
     public static function streamChat(array $creds, string $userId, string $agent, string $sessionKey, string $message, int $timeoutMs, callable $emit, callable $idle): void
@@ -1172,7 +1214,7 @@ final class DeweeGatewayConnection
                 try {
                     $frame = $conn->next(min(1.0, $remaining));
                 } catch (DeweeGatewayError $e) {
-                    $emit(['type' => 'error', 'message' => $e->getMessage(), 'code' => $e->gatewayCode]);
+                    $emit(DeweeWebchat::gatewayErrorEvent($e), $e->getMessage());
                     break;
                 }
                 if ($frame === null) {
@@ -1187,7 +1229,7 @@ final class DeweeGatewayConnection
                         $res = self::result($frame);
                         $emit(['type' => 'done', 'content' => (string) (self::prop($res, 'content') ?? ''), 'usage' => self::prop($res, 'usage')]);
                     } catch (DeweeGatewayError $e) {
-                        $emit(['type' => 'error', 'message' => $e->getMessage(), 'code' => $e->gatewayCode]);
+                        $emit(DeweeWebchat::gatewayErrorEvent($e), $e->getMessage());
                     }
                     break;
                 }

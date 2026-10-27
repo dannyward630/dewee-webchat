@@ -9,7 +9,7 @@ export type ChatStreamEvent =
   | { type: "tool_call"; id: string; name: string; arguments?: unknown }
   | { type: "tool_result"; id: string; name: string; isError: boolean; result?: string }
   | { type: "done"; content: string; usage?: Record<string, number> }
-  | { type: "error"; message: string; code?: string; remediation?: Remediation };
+  | { type: "error"; message: string; code?: string; remediation?: Remediation; retryAfterMs?: number };
 
 /** The seven typed identity errors of the Dewee gateway, forwarded as `error.code` for signed-in users. */
 export const IDENTITY_ERROR_CODES = [
@@ -28,15 +28,32 @@ export function isIdentityErrorCode(code: unknown): code is IdentityErrorCode {
   return typeof code === "string" && (IDENTITY_ERROR_CODES as readonly string[]).includes(code);
 }
 
+/**
+ * Admission refusals of the gateway for `chat.send`, forwarded as `error.code`: `POLICY_DENIED` (the
+ * message is outside the policy, e.g. too long; not retryable) and `RATE_LIMITED` (rate limit, a run
+ * still answering the previous message, or the counter backend unavailable; carries `retryAfterMs`).
+ * `CHALLENGE_REQUIRED` is reserved for the gateway challenge protocol and carries no payload yet.
+ */
+export const ADMISSION_ERROR_CODES = ["POLICY_DENIED", "RATE_LIMITED", "CHALLENGE_REQUIRED"] as const;
+
+export type AdmissionErrorCode = (typeof ADMISSION_ERROR_CODES)[number];
+
+export function isAdmissionErrorCode(code: unknown): code is AdmissionErrorCode {
+  return typeof code === "string" && (ADMISSION_ERROR_CODES as readonly string[]).includes(code);
+}
+
 /** What to do about an identity error: `action` (e.g. `reauthenticate`, `retry_later`) and who acts (`end_user`, `operator`, `integrator`). */
 export interface Remediation {
   action: string;
   audience: string;
 }
 
-/** Error body of every JSON route. `remediation` is present for identity errors only. */
+/**
+ * Error body of every JSON route. `remediation` is present for identity errors only, `retryAfterMs`
+ * for `RATE_LIMITED` refusals of the gateway (also sent as the `Retry-After` header, in seconds).
+ */
 export interface ErrorBody {
-  error: { message: string; code: string; remediation?: Remediation };
+  error: { message: string; code: string; remediation?: Remediation; retryAfterMs?: number };
 }
 
 export interface AgentInfo {

@@ -1,5 +1,5 @@
 // <dewee-chat> — framework-agnostic chat widget (Shadow DOM, zero dependencies).
-import { isIdentityErrorCode, isLinkErrorCode, type ActionSensitivity, type AgentInfo, type ChatRequestBody, type ChatStreamEvent, type HistoryMessage, type LinkResponse, type PublicConfig, type ToolCallView } from "../protocol";
+import { isAdmissionErrorCode, isIdentityErrorCode, isLinkErrorCode, type ActionSensitivity, type AgentInfo, type ChatRequestBody, type ChatStreamEvent, type HistoryMessage, type LinkResponse, type PublicConfig, type ToolCallView } from "../protocol";
 import { ActionRegistry, runActionCall, type ActionCallStatus, type ActionConfirmHook, type PageAction, type PageActionInfo } from "../actions/action-runner";
 import {
   formatActionResults,
@@ -16,7 +16,11 @@ import { ApiClient, ApiError, type RequestHeadersOption } from "./api-client";
 import { showConfirmDialog } from "./confirm-dialog";
 import { icons, pickStrings, type Strings } from "./i18n";
 import { renderMarkdown } from "./markdown";
+import { SendCooldown } from "./send-cooldown";
 import { styles } from "./styles";
+
+/** Pause after a RATE_LIMITED refusal that says nothing about when to retry. */
+const DEFAULT_COOLDOWN_MS = 5_000;
 
 export interface DeweeChatConfig {
   /** Backend base URL (the server handler). Default: "/api/dewee". */
@@ -118,6 +122,8 @@ interface ViewMessage extends HistoryMessage {
   view?: ViewRefs;
   /** Automatic action-result follow-up: kept in the transcript model, not shown. */
   hidden?: boolean;
+  /** Visitor message the gateway refused (POLICY_DENIED): the localized reason shown next to it. */
+  refusal?: string;
   /** The visitor pressed Stop: never execute directives from a cut-off answer. */
   stopped?: boolean;
   actionsHash?: string;
@@ -177,10 +183,12 @@ export class DeweeChatElement extends ElementBase {
   private propActionNames = new Set<string>();
   private hooks: Pick<DeweeChatConfig, "confirm" | "getPageContext" | "headers" | "fetch"> = {};
   private acks = new Map<string, string>();
+  /** Pause after a RATE_LIMITED refusal; send stays disabled until it ends. */
+  private cooldown = new SendCooldown((s) => this.renderCooldown(s), () => this.endCooldown());
   private els!: {
     launcher: HTMLButtonElement; panel: HTMLElement; log: HTMLElement; title: HTMLElement; subtitle: HTMLElement;
     status: HTMLElement; avatar: HTMLElement; select: HTMLSelectElement; input: HTMLTextAreaElement; send: HTMLButtonElement;
-    newChat: HTMLButtonElement; close: HTMLButtonElement; foot: HTMLElement;
+    newChat: HTMLButtonElement; close: HTMLButtonElement; foot: HTMLElement; cooldown: HTMLElement; announcer: HTMLElement;
   };
 
   constructor() {
@@ -273,7 +281,7 @@ export class DeweeChatElement extends ElementBase {
   /** Sends a message programmatically (opens the widget first). */
   async send(text: string): Promise<void> {
     const message = text.trim();
-    if (!message || this.running) return;
+    if (!message || this.running || this.cooldown.active) return;
     if (this.config.mode !== "inline" && !this.hasAttribute("data-open")) this.open();
     await this.activate();
     this.els.input.value = "";
@@ -642,6 +650,8 @@ export class DeweeChatElement extends ElementBase {
         <div class="log" part="log" role="log" aria-live="polite"></div>
         <div class="challenge"><slot name="challenge"></slot></div>
         <form class="composer" part="composer">
+          <div class="cooldown" part="cooldown" aria-hidden="true" hidden></div>
+          <div class="sr-only announcer" role="status" aria-live="polite"></div>
           <div class="box">
             <textarea rows="1" maxlength="4000"></textarea>
             <button class="send" type="submit"></button>
@@ -653,7 +663,7 @@ export class DeweeChatElement extends ElementBase {
     this.els = {
       launcher: $(".launcher"), panel: $(".panel"), log: $(".log"), title: $(".title"), subtitle: $(".subtitle"),
       status: $(".status"), avatar: $(".avatar"), select: $(".agent-select"), input: $("textarea"), send: $(".send"),
-      newChat: $(".new"), close: $(".close"), foot: $(".foot"),
+      newChat: $(".new"), close: $(".close"), foot: $(".foot"), cooldown: $(".cooldown"), announcer: $(".announcer"),
     };
     const e = this.els;
     e.launcher.addEventListener("click", () => this.toggle());
@@ -687,7 +697,29 @@ export class DeweeChatElement extends ElementBase {
     b.innerHTML = this.running ? icons.stop : icons.send;
     b.setAttribute("aria-label", this.running ? this.strings.stop : this.strings.send);
     b.title = b.getAttribute("aria-label")!;
-    b.disabled = !this.running && !this.els.input.value.trim();
+    b.disabled = !this.running && (this.cooldown.active || !this.els.input.value.trim());
+  }
+
+  /** Disables sending for `ms` and announces it; the visible countdown is not read out every second. */
+  private startCooldown(ms?: number) {
+    // Only a positive finite value is trusted; anything else from a custom backend gets the default.
+    this.cooldown.start(typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : DEFAULT_COOLDOWN_MS);
+    if (!this.cooldown.active) return;
+    this.renderCooldown(this.cooldown.secondsLeft);
+    this.els.announcer.textContent = this.strings.cooldownStart(this.cooldown.secondsLeft);
+    this.updateSendButton();
+  }
+
+  private renderCooldown(secondsLeft: number) {
+    this.els.cooldown.hidden = false;
+    this.els.cooldown.textContent = this.strings.cooldown(secondsLeft);
+  }
+
+  private endCooldown() {
+    this.els.cooldown.hidden = true;
+    this.els.cooldown.textContent = "";
+    this.els.announcer.textContent = this.strings.cooldownOver;
+    this.updateSendButton();
   }
 
   private setRunning(ctrl: AbortController | null) {
@@ -825,6 +857,15 @@ export class DeweeChatElement extends ElementBase {
     const c = this.config;
     if (m.role === "user") {
       v.md.textContent = m.content;
+      v.root.classList.toggle("refused", !!m.refusal);
+      let note = v.root.querySelector<HTMLElement>(".refusal");
+      if (m.refusal && !note) {
+        note = document.createElement("div");
+        note.className = "refusal";
+        v.root.appendChild(note);
+      }
+      if (note && m.refusal) note.textContent = `⚠️ ${m.refusal}`;
+      else note?.remove();
       return;
     }
     v.root.classList.toggle("error", m.status === "error");
@@ -953,7 +994,7 @@ export class DeweeChatElement extends ElementBase {
         break;
       case "error":
         m.status = "error";
-        this.showError(m, new ApiError(e.message, 500, e.code, e.remediation));
+        this.showError(m, new ApiError(e.message, 500, e.code, e.remediation, e.retryAfterMs));
         break;
     }
     this.scheduleUpdate(m);
@@ -988,12 +1029,19 @@ export class DeweeChatElement extends ElementBase {
   }
 
   private showError(m: ViewMessage | null, err: Error) {
-    const code = (err as ApiError).code;
-    // Identity errors get the widget's own localized copy; the server text is only a fallback.
-    const localized = isIdentityErrorCode(code) ? this.strings.identityErrors[code] : isLinkErrorCode(code) ? this.strings.linkErrors[code] : "";
+    const { code, remediation, retryAfterMs } = err as ApiError;
+    // Identity and admission errors get the widget's own localized copy; the server text is only a fallback.
+    const localized = isIdentityErrorCode(code)
+      ? this.strings.identityErrors[code]
+      : isAdmissionErrorCode(code)
+        ? this.strings.admissionErrors[code]
+        : isLinkErrorCode(code)
+          ? this.strings.linkErrors[code]
+          : "";
     const text = localized || err.message || this.strings.errorGeneric;
-    const remediation = (err as ApiError).remediation;
-    this.emit("dewee:error", remediation ? { message: text, code, remediation } : { message: text, code });
+    this.emit("dewee:error", { message: text, code, ...(remediation && { remediation }), ...(retryAfterMs && { retryAfterMs }) });
+    if (code === "RATE_LIMITED") this.startCooldown(retryAfterMs);
+    if (m && isAdmissionErrorCode(code) && this.refuseInline(m, code, text)) return;
     if (m) {
       m.content = m.content ? `${m.content}\n\n> ⚠️ ${text}` : `⚠️ ${text}`;
       m.status = "error";
@@ -1005,6 +1053,28 @@ export class DeweeChatElement extends ElementBase {
     div.innerHTML = `<div class="bubble"></div>`;
     div.firstElementChild!.textContent = `⚠️ ${text}`;
     this.els.log.appendChild(div);
+  }
+
+  /**
+   * An admission refusal: the visitor's message never reached the agent, so it goes back to an empty
+   * composer to edit or resend. `POLICY_DENIED` is shown next to that message instead of as an empty
+   * reply. Returns true when the error was shown here.
+   */
+  private refuseInline(reply: ViewMessage, code: string, text: string): boolean {
+    const i = this.messages.indexOf(reply);
+    const question = i > 0 ? this.messages[i - 1] : undefined;
+    if (question?.role !== "user" || question.hidden) return false;
+    if (!this.els.input.value.trim()) {
+      this.els.input.value = question.content;
+      this.autosize();
+    }
+    if (code !== "POLICY_DENIED" || reply.content) return false;
+    reply.status = "error";
+    reply.hidden = true;
+    if (reply.view) reply.view.root.hidden = true;
+    question.refusal = text;
+    this.updateMessage(question);
+    return true;
   }
 
   /** Renders a Turnstile challenge in light DOM (slotted) and resolves with its token. */
