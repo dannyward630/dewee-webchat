@@ -8,6 +8,11 @@ function b64url(bytes: Uint8Array): string {
   return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** SHA-256 of a string's UTF-8 bytes, as 43 base64url characters. */
+export async function sha256B64url(s: string): Promise<string> {
+  return b64url(new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(s))));
+}
+
 function fromB64url(s: string): Uint8Array<ArrayBuffer> {
   const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4));
   return Uint8Array.from(bin, (c) => c.charCodeAt(0));
@@ -40,6 +45,13 @@ export interface VisitorClaims {
    * together with `ids`, so the browser never sees the subject or its digest.
    */
   sub?: string;
+  /**
+   * CCP transport only: the CCP edge session token (`dws1.…`). In the signed token it is encrypted
+   * (AES-256-GCM, its own key label), so the browser never holds the raw value.
+   */
+  es?: string;
+  /** CCP transport only: expiry of `es` as CCP reported it, epoch ms on this server's clock. */
+  ese?: number;
 }
 
 /** Longest identity session token the gateway issues (matches the `@dewee/identity` limit). */
@@ -54,25 +66,58 @@ const MAX_SEALED_PLAINTEXT = '{"t":"","h":""}'.length + 6 * MAX_IDENTITY_SESSION
 const MAX_SEALED_LENGTH = Math.ceil(((12 + MAX_SEALED_PLAINTEXT + 16) * 4) / 3);
 const AGENT_CLAIM_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
 
+/** Longest CCP edge session token accepted for sealing (a `dws1.` token is about 200 characters). */
+const MAX_EDGE_SESSION_LENGTH = 1024;
+/** Longest sealed edge session: 12-byte IV + `{"t":"…"}` (6 bytes per character at worst) + 16-byte tag, base64url. */
+const MAX_SEALED_EDGE_LENGTH = Math.ceil(((12 + '{"t":""}'.length + 6 * MAX_EDGE_SESSION_LENGTH + 16) * 4) / 3);
+
+const IDENTITY_SEAL_INFO = "dewee-webchat:identity-session:aes-256-gcm:v1";
+const EDGE_SEAL_INFO = "dewee-webchat:edge-session:aes-256-gcm:v1";
+
 const sealKeyCache = new Map<string, Promise<CryptoKey>>();
-/** AES-256-GCM key for identity sessions, derived from the visitor secret with its own HKDF label. */
-function sealKey(secret: string): Promise<CryptoKey> {
-  let k = sealKeyCache.get(secret);
+/** AES-256-GCM key derived from the visitor secret with HKDF; each sealed claim has its own label. */
+function sealKey(secret: string, info: string = IDENTITY_SEAL_INFO): Promise<CryptoKey> {
+  const id = `${info}\n${secret}`;
+  let k = sealKeyCache.get(id);
   if (!k) {
     k = crypto.subtle
       .importKey("raw", enc.encode(secret), "HKDF", false, ["deriveKey"])
       .then((base) =>
         crypto.subtle.deriveKey(
-          { name: "HKDF", hash: "SHA-256", salt: enc.encode("dewee-webchat"), info: enc.encode("dewee-webchat:identity-session:aes-256-gcm:v1") },
+          { name: "HKDF", hash: "SHA-256", salt: enc.encode("dewee-webchat"), info: enc.encode(info) },
           base,
           { name: "AES-GCM", length: 256 },
           false,
           ["encrypt", "decrypt"],
         ),
       );
-    sealKeyCache.set(secret, k);
+    sealKeyCache.set(id, k);
   }
   return k;
+}
+
+/** The edge session ciphertext is bound to the visitor it was issued for. */
+const edgeAad = (v: string) => enc.encode(`dewee-webchat:es:${v}`);
+
+async function sealEdgeSession(secret: string, v: string, token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: edgeAad(v) }, await sealKey(secret, EDGE_SEAL_INFO), enc.encode(JSON.stringify({ t: token }))));
+  const out = new Uint8Array(iv.length + ct.length);
+  out.set(iv);
+  out.set(ct, iv.length);
+  return b64url(out);
+}
+
+async function openEdgeSession(secret: string, v: string, sealed: string): Promise<string | null> {
+  const raw = fromB64url(sealed);
+  if (raw.length <= 12 + 16) return null;
+  try {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12), additionalData: edgeAad(v) }, await sealKey(secret, EDGE_SEAL_INFO), raw.slice(12));
+    const parsed = JSON.parse(new TextDecoder().decode(pt)) as { t?: unknown };
+    return typeof parsed?.t === "string" && parsed.t !== "" && parsed.t.length <= MAX_EDGE_SESSION_LENGTH ? parsed.t : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The ciphertext is bound to the visitor and agent it was issued for. */
@@ -119,26 +164,76 @@ export function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
-  let wire: Omit<VisitorClaims, "sub"> = claims;
+/**
+ * Purpose label of a signed-in reuse hint (wire claim `p`). A token with any `p` is never a visitor
+ * bearer token: {@link verifyVisitorToken} refuses it and only {@link verifyReuseHint} accepts it.
+ */
+const REUSE_HINT_PURPOSE = "reuse";
+
+/** Signs a visitor bearer token. */
+export function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
+  return signClaims(secret, claims);
+}
+
+/**
+ * Signs a signed-in reuse hint: the same sealed claims as the visitor token, but only `/session`
+ * accepts it, and only to rebuild the session of the user the host authenticates at that moment.
+ * It is never a credential on its own.
+ */
+export function signReuseHint(secret: string, claims: VisitorClaims): Promise<string> {
+  if (!claims.ids || !claims.ida || !claims.sub) throw new Error("a reuse hint needs a signed-in session with its subject digest");
+  return signClaims(secret, claims, REUSE_HINT_PURPOSE);
+}
+
+/** Verifies a visitor bearer token. A reuse hint (or any token with a purpose label) is refused. */
+export function verifyVisitorToken(secret: string, token: string): Promise<VisitorClaims | null> {
+  return verifyClaims(secret, token);
+}
+
+/** Verifies a reuse hint; a visitor bearer token is refused. Null unless it carries a sealed signed-in session. */
+export async function verifyReuseHint(secret: string, token: string): Promise<VisitorClaims | null> {
+  const claims = await verifyClaims(secret, token, REUSE_HINT_PURPOSE);
+  return claims?.ids && claims.sub ? claims : null;
+}
+
+async function signClaims(secret: string, claims: VisitorClaims, purpose?: string): Promise<string> {
+  let wire: Omit<VisitorClaims, "sub"> & { p?: string } = claims;
   if (claims.ids !== undefined && claims.ida !== undefined) {
     const { sub, ...rest } = claims;
     wire = { ...rest, ids: await sealIdentitySession(secret, claims.v, claims.ida, sub ? { t: claims.ids, h: sub } : { t: claims.ids }) };
   }
+  if (claims.es !== undefined) {
+    if (typeof claims.es !== "string" || claims.es === "" || claims.es.length > MAX_EDGE_SESSION_LENGTH) throw new Error("edge session token is empty or too long");
+    if (typeof claims.ese !== "number" || !Number.isFinite(claims.ese)) throw new Error("edge session expiry is required");
+    wire = { ...wire, es: await sealEdgeSession(secret, claims.v, claims.es) };
+  }
+  if (purpose) wire = { ...wire, p: purpose };
   const body = b64url(enc.encode(JSON.stringify(wire)));
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(body)));
   return `${body}.${b64url(sig)}`;
 }
 
-export async function verifyVisitorToken(secret: string, token: string): Promise<VisitorClaims | null> {
+async function verifyClaims(secret: string, token: string, purpose?: string): Promise<VisitorClaims | null> {
+  if (typeof token !== "string") return null;
   const [body, sig] = token.split(".");
   if (!body || !sig) return null;
   try {
     const ok = await crypto.subtle.verify("HMAC", await hmacKey(secret), fromB64url(sig), enc.encode(body));
     if (!ok) return null;
-    const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims;
+    const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims & { p?: unknown };
+    // A token is accepted only for the purpose it was signed for: a reuse hint is no bearer token.
+    if (claims.p !== purpose) return null;
     if (typeof claims.v !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(claims.v)) return null;
     if (typeof claims.exp !== "number" || claims.exp < Date.now()) return null;
+    // An edge session claim is all or nothing too: the sealed token always travels with its expiry.
+    let edge: Pick<VisitorClaims, "es" | "ese"> = {};
+    if (claims.es !== undefined || claims.ese !== undefined) {
+      if (typeof claims.es !== "string" || claims.es === "" || claims.es.length > MAX_SEALED_EDGE_LENGTH) return null;
+      if (typeof claims.ese !== "number" || !Number.isFinite(claims.ese)) return null;
+      const es = await openEdgeSession(secret, claims.v, claims.es);
+      if (!es) return null;
+      edge = { es, ese: claims.ese };
+    }
     // An identity claim is all or nothing: a session token always travels with the agent it is bound to.
     if (claims.ids !== undefined || claims.ida !== undefined) {
       if (typeof claims.ids !== "string" || claims.ids === "" || claims.ids.length > MAX_SEALED_LENGTH) return null;
@@ -146,9 +241,12 @@ export async function verifyVisitorToken(secret: string, token: string): Promise
       if ((claims as { sub?: unknown }).sub !== undefined) return null; // the digest only ever travels sealed
       const opened = await openIdentitySession(secret, claims.v, claims.ida, claims.ids);
       if (!opened) return null;
-      return opened.h ? { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, sub: opened.h } : { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida };
+      return opened.h
+        ? { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, sub: opened.h, ...edge }
+        : { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, ...edge };
     }
-    return claims;
+    if (purpose !== undefined) return { v: claims.v, exp: claims.exp, ...edge };
+    return claims.es !== undefined ? { v: claims.v, exp: claims.exp, ...edge } : claims;
   } catch {
     return null;
   }

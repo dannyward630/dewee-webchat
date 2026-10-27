@@ -2,13 +2,16 @@ export {
   createDeweeHandler,
   optionsFromEnv,
   type AuthenticatedUser,
+  type DeweeHandler,
   type DeweeHandlerOptions,
   type DeweeIdentityOptions,
   type DeweeIdentitySdk,
+  type DeweeTransport,
   type IdentityPrivateJwk,
   type IdentitySigner,
 } from "./handler";
 export { toNodeHandler } from "./node";
+export { CcpError, type CcpOptions } from "./ccp-client";
 export {
   GatewayConnection,
   GatewayError,

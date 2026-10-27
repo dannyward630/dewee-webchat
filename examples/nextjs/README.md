@@ -4,8 +4,8 @@ A Next.js App Router app with a floating Dewee chat widget, deployed to Cloudfla
 [OpenNext](https://opennext.js.org/cloudflare). Live at <https://webchat-next.dewee.sh>.
 
 - `app/api/dewee/[...path]/route.ts`: one `createDeweeHandler()` instance serving `GET`, `POST` and
-  `OPTIONS` for `/api/dewee/{config,session,chat,history}`. Chat replies stream as SSE. The gateway
-  token stays on the server.
+  `OPTIONS` for `/api/dewee/{config,session,chat,history}`. Chat replies stream as SSE. The integration
+  secret stays on the server.
 - `app/chat-widget.tsx`: client component that renders `<DeweeChat>` from `dewee-webchat/react`.
 - `app/page.tsx`: landing page.
 
@@ -17,12 +17,26 @@ available under `next dev`.
 
 | Variable | Where | Purpose |
 |---|---|---|
+| `DEWEE_CCP_CHAT_URL` | `wrangler.jsonc` vars | CCP ingress URL from the CCP Website chat page |
+| `DEWEE_WEBCHAT_INTEGRATION_ID` | `wrangler.jsonc` vars | `wci_…` integration id |
+| `DEWEE_WEBCHAT_INTEGRATION_SECRET` | secret | `dwc_…` integration secret, server only |
+| `DEWEE_WEBCHAT_SECRET` | secret | HMAC secret for visitor sessions (at least 32 random characters) |
+| `DEWEE_ALLOWED_ORIGINS` | optional var | Other sites allowed to call this backend |
+
+With a CCP Website chat integration (recommended) the agents, sign-in mode, limits and whether
+reasoning and tool activity are shown are set in CCP, not here. The hosted demo still runs the
+deprecated `legacy-gateway` transport; switch with the comment in `wrangler.jsonc` and
+[docs/migrating-to-ccp-transport.md](../../docs/migrating-to-ccp-transport.md). The two transports'
+variables cannot be mixed: the handler refuses to start instead of guessing.
+
+Deprecated `legacy-gateway` transport (`DEWEE_WEBCHAT_TRANSPORT=legacy-gateway`):
+
+| Variable | Where | Purpose |
+|---|---|---|
 | `DEWEE_GATEWAY_URL` | `wrangler.jsonc` vars | Gateway origin |
 | `DEWEE_AGENTS` | `wrangler.jsonc` vars | Comma-separated allowlist of agent ids (first is the default) |
 | `DEWEE_DEFAULT_AGENT` | `wrangler.jsonc` vars | Default agent |
 | `DEWEE_GATEWAY_TOKEN` | secret | Gateway token or operator API key |
-| `DEWEE_WEBCHAT_SECRET` | secret | HMAC secret for visitor sessions (at least 32 random characters) |
-| `DEWEE_ALLOWED_ORIGINS` | optional var | Other sites allowed to call this backend |
 
 Locally, secrets go in `.dev.vars` (copy `.dev.vars.example`). Avoid `.env` files on Cloudflare (see
 below). `.env.example` is only for hosting on plain Node with `next build && next start`.
@@ -31,7 +45,7 @@ below). `.env.example` is only for hosting on plain Node with `next build && nex
 
 ```sh
 pnpm install
-cp .dev.vars.example .dev.vars   # fill in DEWEE_GATEWAY_TOKEN and DEWEE_WEBCHAT_SECRET
+cp .dev.vars.example .dev.vars   # fill in the secrets
 pnpm dev                         # http://localhost:3000
 pnpm preview                     # build the Worker and run it locally in workerd
 ```
@@ -43,7 +57,7 @@ pnpm preview                     # build the Worker and run it locally in worker
 2. Set the secrets once:
 
    ```sh
-   pnpm wrangler secret put DEWEE_GATEWAY_TOKEN
+   pnpm wrangler secret put DEWEE_WEBCHAT_INTEGRATION_SECRET   # legacy-gateway: DEWEE_GATEWAY_TOKEN
    node -e "process.stdout.write(require('crypto').randomBytes(32).toString('base64url'))" | pnpm wrangler secret put DEWEE_WEBCHAT_SECRET
    ```
 

@@ -1,5 +1,5 @@
 // Mounts the dewee-webchat backend at /api/dewee/* (config, session, chat, history).
-// The gateway token stays on the server; the browser only ever sees signed visitor tokens.
+// The integration secret stays on the server; the browser only ever sees signed visitor tokens.
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
 

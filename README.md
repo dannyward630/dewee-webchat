@@ -1,15 +1,15 @@
 # dewee-webchat
 
 Embeddable chat for [Dewee](https://dewee.sh) agents. Drop one tag on any site and visitors talk to your
-agent, with streamed reasoning, tool calls, markdown, history and agent switching. Your gateway token
-stays on your server.
+agent, with streamed answers, markdown, history and agent switching. Your integration secret stays on
+your server.
 
 **▶ Playground:** [webchat.dewee.sh](https://webchat.dewee.sh) · **npm:** [`dewee-webchat`](https://www.npmjs.com/package/dewee-webchat) ·
 **CDN:** `https://webchat-cdn.dewee.sh/dewee-webchat@0.1.1/dewee-webchat.js`
 
 ```
-browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ──WebSocket──▶  Dewee gateway
-   (visitor token only)                   (holds the gateway token)                (agents, MCP, tools)
+browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ──HTTPS + SSE──▶  Dewee CCP (Website chat)
+   (visitor token only)                   (holds the integration secret)            (agents, sign-in, limits)
 ```
 
 ## Quick start
@@ -18,15 +18,20 @@ browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ─
 npm i dewee-webchat
 ```
 
-1. Mount the backend handler at `/api/dewee/*` (Workers, Next.js, Astro, Node, Bun, Deno, or the PHP file).
-2. Set `DEWEE_GATEWAY_URL`, `DEWEE_GATEWAY_TOKEN`, `DEWEE_WEBCHAT_SECRET`, `DEWEE_AGENTS`. See [`.env.example`](.env.example).
-3. Add the widget:
+1. In CCP, create a **Website chat** integration: pick its agents, allowed sites and sign-in mode.
+2. Mount the backend handler at `/api/dewee/*` (Workers, Next.js, Astro, Node, Bun, Deno, or the PHP file).
+3. Set `DEWEE_CCP_CHAT_URL`, `DEWEE_WEBCHAT_INTEGRATION_ID`, `DEWEE_WEBCHAT_INTEGRATION_SECRET` (from the
+   integration page) and `DEWEE_WEBCHAT_SECRET`. See [`.env.example`](.env.example).
+4. Add the widget:
 
 ```html
 <script src="https://webchat-cdn.dewee.sh/dewee-webchat@0.1.1/dewee-webchat.js" data-endpoint="/api/dewee" defer></script>
 ```
 
 Full options, framework snippets and the security model: [packages/dewee-webchat/README.md](packages/dewee-webchat/README.md).
+
+Connecting straight to a Dewee Gateway with a URL and token (`transport: "legacy-gateway"`) still
+works but is deprecated. Moving over: [docs/migrating-to-ccp-transport.md](docs/migrating-to-ccp-transport.md).
 
 ## Signed-in users
 
@@ -35,11 +40,13 @@ handler. It exchanges your user for a short-lived Dewee identity session, and th
 that verified user, with private tools scoped to them. You no longer mint visitor tokens, push
 per-visitor credentials or build your own account linking: a signed-in user links Telegram or Discord
 from the widget with a one-time code. Anonymous visitors work exactly as before. Setup and the
-fail-closed rules: [Signed-in users](packages/dewee-webchat/README.md#signed-in-users).
+fail-closed rules: [Signed-in users](packages/dewee-webchat/README.md#signed-in-users). The PHP backend
+serves anonymous visitors only.
 
 ## Live examples
 
-All of them run on Cloudflare and share the same scoped demo key.
+All of them run on Cloudflare and share the same scoped demo key. The hosted demos still use the
+deprecated `legacy-gateway` transport; each example's README shows the CCP configuration first.
 
 | Stack | Live | Source |
 |---|---|---|
@@ -59,6 +66,7 @@ All of them run on Cloudflare and share the same scoped demo key.
 | [`php/dewee-webchat.php`](php) | Single-file PHP backend with the same HTTP contract |
 | [`cdn/`](cdn) | Worker that serves versioned bundles at `webchat-cdn.dewee.sh` |
 | [`docs/http-contract.md`](docs/http-contract.md) | Wire format between the widget and any backend |
+| [`docs/migrating-to-ccp-transport.md`](docs/migrating-to-ccp-transport.md) | Moving from a direct Gateway URL and token to a CCP Website chat integration |
 | [`examples/`](examples) | Runnable integrations |
 | [`vendor/`](vendor) | Temporary: the packed `@dewee/identity` SDK used by the tests (see below) |
 

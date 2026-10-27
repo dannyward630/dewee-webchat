@@ -183,30 +183,30 @@ const TABS = {
   },
   next: {
     label: "Next.js route",
-    note: "app/api/dewee/[...path]/route.ts — set the env vars in .env.local or your host's secrets.",
+    note: "app/api/dewee/[...path]/route.ts — create a Website chat integration in CCP, then set its values in .env.local or your host's secrets.",
     code(c) {
-      return `// app/api/dewee/[...path]/route.ts\nimport { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";\n\nexport const dynamic = "force-dynamic";\n\nconst handler = createDeweeHandler(optionsFromEnv(process.env));\nexport { handler as GET, handler as POST, handler as OPTIONS };\n\n// .env.local\n// DEWEE_GATEWAY_URL=https://your-gateway.example.com\n// DEWEE_GATEWAY_TOKEN=…          (operator API key, server only)\n// DEWEE_WEBCHAT_SECRET=…         (openssl rand -base64 32)\n// DEWEE_AGENTS=${c.agent || "your-agent"}`;
+      return `// app/api/dewee/[...path]/route.ts\nimport { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";\n\nexport const dynamic = "force-dynamic";\n\nconst handler = createDeweeHandler(optionsFromEnv(process.env));\nexport { handler as GET, handler as POST, handler as OPTIONS };\n\n// .env.local (values from the CCP Website chat page; agents are chosen there)\n// DEWEE_CCP_CHAT_URL=https://app.dewee.sh/api/public/webchat/v1/wci_…\n// DEWEE_WEBCHAT_INTEGRATION_ID=wci_…\n// DEWEE_WEBCHAT_INTEGRATION_SECRET=dwc_…   (server only)\n// DEWEE_WEBCHAT_SECRET=…                   (openssl rand -base64 32)`;
     },
   },
   workers: {
     label: "Cloudflare Workers",
-    note: "Secrets: wrangler secret put DEWEE_GATEWAY_TOKEN, then DEWEE_WEBCHAT_SECRET.",
+    note: "Secrets: wrangler secret put DEWEE_WEBCHAT_INTEGRATION_SECRET, then DEWEE_WEBCHAT_SECRET.",
     code(c) {
-      return `// src/worker.ts\nimport { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";\n\nlet dewee;\nexport default {\n  fetch(req, env) {\n    if (new URL(req.url).pathname.startsWith("/api/dewee/")) {\n      dewee ??= createDeweeHandler(optionsFromEnv(env));\n      return dewee(req);\n    }\n    return env.ASSETS.fetch(req);\n  },\n};\n\n// wrangler.jsonc → "vars": { "DEWEE_GATEWAY_URL": "https://your-gateway.example.com", "DEWEE_AGENTS": "${c.agent || "your-agent"}" }`;
+      return `// src/worker.ts\nimport { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";\n\nlet dewee;\nexport default {\n  fetch(req, env) {\n    if (new URL(req.url).pathname.startsWith("/api/dewee/")) {\n      dewee ??= createDeweeHandler(optionsFromEnv(env));\n      return dewee(req);\n    }\n    return env.ASSETS.fetch(req);\n  },\n};\n\n// wrangler.jsonc → "vars": { "DEWEE_CCP_CHAT_URL": "https://app.dewee.sh/api/public/webchat/v1/wci_…", "DEWEE_WEBCHAT_INTEGRATION_ID": "wci_…" }`;
     },
   },
   express: {
     label: "Express",
     note: "Node 20+. Also works with node:http, Fastify (raw req/res) and Bun/Deno (pass the handler directly).",
     code(c) {
-      return `import express from "express";\nimport { createDeweeHandler, optionsFromEnv, toNodeHandler } from "dewee-webchat/server";\n\nconst app = express();\napp.all("/api/dewee/*path", toNodeHandler(createDeweeHandler(optionsFromEnv(process.env))));\napp.listen(3000);\n\n// DEWEE_GATEWAY_URL, DEWEE_GATEWAY_TOKEN, DEWEE_WEBCHAT_SECRET, DEWEE_AGENTS=${c.agent || "your-agent"}`;
+      return `import express from "express";\nimport { createDeweeHandler, optionsFromEnv, toNodeHandler } from "dewee-webchat/server";\n\nconst app = express();\napp.all("/api/dewee/*path", toNodeHandler(createDeweeHandler(optionsFromEnv(process.env))));\napp.listen(3000);\n\n// DEWEE_CCP_CHAT_URL, DEWEE_WEBCHAT_INTEGRATION_ID, DEWEE_WEBCHAT_INTEGRATION_SECRET, DEWEE_WEBCHAT_SECRET`;
     },
   },
   php: {
     label: "PHP",
     note: "One file, no Composer. Download php/dewee-webchat.php from the GitHub release.",
     code(c) {
-      return `<?php\n// api/dewee.php  →  served as /api/dewee.php/{config|session|chat|history}\nrequire __DIR__ . '/../lib/dewee-webchat.php';\n\nDeweeWebchat::loadEnvFile(__DIR__ . '/../.env'); // optional; real env vars win\nDeweeWebchat::handle(['agents' => ['${c.agent || "your-agent"}']]);\n\n// .env → DEWEE_GATEWAY_URL, DEWEE_GATEWAY_TOKEN, DEWEE_WEBCHAT_SECRET\n// Widget: data-endpoint="/api/dewee.php"`;
+      return `<?php\n// api/dewee.php  →  served as /api/dewee.php/{config|session|chat|history}\nrequire __DIR__ . '/../lib/dewee-webchat.php';\n\nDeweeWebchat::loadEnvFile(__DIR__ . '/../.env'); // optional; real env vars win\nDeweeWebchat::handle(); // agents come from the CCP Website chat page\n\n// .env → DEWEE_CCP_CHAT_URL, DEWEE_WEBCHAT_INTEGRATION_ID, DEWEE_WEBCHAT_INTEGRATION_SECRET, DEWEE_WEBCHAT_SECRET\n// Anonymous visitors only: signed-in users need the Node handler.\n// Widget: data-endpoint="/api/dewee.php"`;
     },
   },
 };

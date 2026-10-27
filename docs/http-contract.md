@@ -35,6 +35,17 @@ Sending a still-valid previous `token` refreshes it and keeps the same `visitorI
 Visitor token = `base64url(JSON{"v": visitorId, "exp": epochMs})` + `.` + `base64url(HMAC-SHA256(secret, body))`.
 `visitorId` matches `^[A-Za-z0-9_-]{8,64}$`.
 
+> **Transport `ccp` only (additive).** The visitor token also carries the CCP edge session: `es` (opaque,
+> `base64url(iv ‖ AES-256-GCM(key, JSON{"t": <edge session>}))`, the key derived from the backend secret
+> with HKDF-SHA-256, info `dewee-webchat:edge-session:aes-256-gcm:v1`, and the associated data binding it to `v`) and `ese` (its expiry, epoch ms on the backend's
+> clock). Both or neither. The answer's `expiresAt` is then the edge session's end, earlier than the
+> token's own `exp`, and `expiresIn` (milliseconds until `expiresAt`, counted from receipt) is added: the
+> widget comes back to `/session` before the edge session lapses, about once an hour. A refresh with a
+> valid `token` keeps the visitor and re-seals a refreshed edge session. With Turnstile configured,
+> `/config` adds `"refreshWithoutTurnstile": true` and such a refresh needs no `turnstileToken`; new
+> visitors still do. A token that carries a purpose claim `p` (the reuse hint below) is never accepted
+> as a visitor token. The legacy gateway transport answers exactly as above.
+
 ## `POST {base}/chat` → `text/event-stream`
 
 Headers: `Authorization: Bearer <visitor token>`.
@@ -43,6 +54,10 @@ The last three are only sent by pages that register [page actions](#page-actions
 request and the gateway message are exactly as before.
 `conversationId` matches `^[A-Za-z0-9_-]{6,64}$`; when missing or invalid the server picks one and
 announces it in the `start` event.
+
+> **Transport `ccp` only (additive).** `agent` (here and on `/history`) must be a key the ingress accepts,
+> `^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$` (up to 100 characters, no `:`); any other value is
+> `400 bad_request` and CCP is not asked.
 
 Each SSE frame is `data: <json>\n\n`; `: ping` comments keep the connection alive. Events:
 
@@ -74,6 +89,13 @@ the stream with a typed `error` event. Its `message` is a fixed English fallback
 most 600000. When the gateway refuses before streaming starts (a signed-in user's connection), the same
 codes are JSON errors: `403 POLICY_DENIED`, `429 RATE_LIMITED` with `error.retryAfterMs` and a
 `Retry-After` header in seconds, `403 CHALLENGE_REQUIRED`.
+
+> **Transport `ccp`.** CCP's refusals of a message are these same admission errors, with the same fixed
+> messages. A `/chat` that CCP answers `429` (`rate_limited` or `concurrency_limited`) is
+> `429 RATE_LIMITED` with `retryAfterMs` from CCP's `Retry-After` (5000 when absent), a run CCP
+> rate-limits mid-stream ends with the `RATE_LIMITED` event, and a `POLICY_DENIED` is passed on typed if
+> CCP sends one (it currently does not). CCP's `403` reasons (disabled integration, agent or origin not allowed) are not message policy and
+> keep their own codes; a rate refusal at `/session` stays `429 rate_limited`.
 
 The gateway owns the shared message limit across every backend replica. The backend's own limiter (in
 memory by default, 20 messages per minute) is defense in depth: it answers `429 rate_limited` without
@@ -145,8 +167,10 @@ option; not the PHP backend yet) changes the routes below. Without it nothing he
 request and response is exactly as described above.
 
 **`GET {base}/config`** adds `"identity": true`, sets `allowAgentSwitch` to `false` and `defaultAgent`
-to the agent sessions are bound to. The widget then asks `/session` on every page load and keeps a
-signed-in session in memory only.
+to the agent sessions are bound to. The widget then asks `/session` on every page load and keeps the
+signed-in session (its bearer token) in memory only. With transport `ccp` it also keeps the answer's
+`reuseHint`, when there is one, in `sessionStorage` (see below); a backend that sends none (legacy
+gateway, PHP) gets nothing stored.
 
 **`POST {base}/session`** first asks the host who the visitor is (server side, from its own login):
 
@@ -163,6 +187,14 @@ signed-in session in memory only.
   subject itself. `exp` is the earlier of the identity session expiry (measured from receipt on the
   backend's clock) and the visitor session lifetime. `visitorId` is derived from the Dewee principal, so
   the same user keeps the same conversations everywhere. If the exchange fails, no token is issued.
+- Transport `ccp` only (additive): the signed-in answer adds `"reuseHint"`, a token with the same sealed
+  claims (plus `es`, `ese`) and a purpose claim `"p": "reuse"`. It is not a bearer token: `/chat`,
+  `/history`, `/link` and an anonymous refresh refuse it. A later `/session` body may carry it as
+  `"reuseHint"`; the backend then reuses its identity session only when the host's current user has the
+  same subject digest, the agent and visitor id match, and more than 2 minutes are left, and never extends
+  it. Anything else is ignored and the user is exchanged again; it never makes a visitor signed in. The
+  widget stores it in `sessionStorage` only when the answer has one and drops it on an anonymous answer,
+  a `401`, or a refused signed-in request.
 - Not signed in: an anonymous visitor token, unless the backend requires sign-in, in which case the
   answer is `401 IDENTITY_REQUIRED`. A still-valid anonymous `token` in the body (more than a day left)
   is returned as is.
@@ -233,6 +265,10 @@ Web-first linking of a chat account for a signed-in user. Headers: `Authorizatio
 token with ids>`. Body: `{ "idempotencyKey"?: string }` (1 to 255 printable ASCII characters). The
 backend calls `POST {gateway}/v1/identity/links` with the identity session and answers:
 
+> **Transport `ccp` only (additive).** The ingress accepts narrower keys (8 to 128 of `[A-Za-z0-9._:-]`),
+> so the backend sends `base64url(SHA-256(idempotencyKey))` instead: every key above works, the same key
+> is still the same request, and two keys stay distinct.
+
 ```json
 { "proofCode": "482913", "expiresAt": 1791621449203,
   "deepLinks": [{ "channelType": "telegram", "channelInstanceId": "…", "name": "acme-bot", "displayName": "Acme Bot" }] }
@@ -270,7 +306,9 @@ itself; host headers with those names are dropped. A cross-origin backend must l
 
 The widget refreshes its visitor session (`POST /session` with the old `token`) once less than 10% of the
 lifetime it observed (`expiresAt` minus the time the session was issued), capped at 24 h and floored at 30 s,
-remains.
+remains. When the answer carries `expiresIn` (transport `ccp`, and signed-in sessions), that lifetime is
+`expiresIn`, counted from receipt; with `ccp` this is the edge session's end, so anonymous visitors
+refresh about hourly.
 
 ## Bring-your-own credentials (optional)
 

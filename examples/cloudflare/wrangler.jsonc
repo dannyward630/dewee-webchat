@@ -17,6 +17,8 @@
     { "name": "SESSION_LIMITER", "namespace_id": "4202", "simple": { "limit": 10, "period": 60 } }
   ],
   "vars": {
+    // Deprecated direct-gateway transport, kept here only for the playground's bring-your-own-gateway panel.
+    "DEWEE_WEBCHAT_TRANSPORT": "legacy-gateway",
     "DEWEE_GATEWAY_URL": "https://dewee.zuey.me",
     "DEWEE_AGENTS": "dewee-web-advisor,zuey-ai",
     "DEWEE_DEFAULT_AGENT": "dewee-web-advisor",

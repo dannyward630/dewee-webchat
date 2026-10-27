@@ -1,4 +1,10 @@
-# Copy to .dev.vars for `pnpm dev` / `pnpm preview`. Never commit .dev.vars.
-DEWEE_GATEWAY_TOKEN=your-gateway-token-or-operator-key
+# Copy to .dev.vars for local dev (never commit .dev.vars). Production: `wrangler secret put <NAME>`.
 # >= 32 random chars, e.g. node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
-DEWEE_WEBCHAT_SECRET=change-me
+DEWEE_WEBCHAT_SECRET=change-me-to-a-long-random-string
+
+# CCP Website chat (recommended): the secret from the CCP Website chat page. Also switch the vars in
+# wrangler.jsonc to DEWEE_CCP_CHAT_URL + DEWEE_WEBCHAT_INTEGRATION_ID (see the comment there).
+# DEWEE_WEBCHAT_INTEGRATION_SECRET=dwc_…
+
+# Deprecated legacy-gateway transport (what the hosted demo still uses):
+DEWEE_GATEWAY_TOKEN=your-gateway-token-or-operator-api-key
