@@ -1,0 +1,190 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`legacy-gateway transport: browser responses > chat stream 1`] = `
+{
+  "body": "data: {"type":"start","conversationId":"conv_abc123","agent":"sales"}
+
+data: {"type":"thinking","text":"Let me check."}
+
+data: {"type":"tool_call","id":"t1","name":"search","arguments":{"q":"x"}}
+
+data: {"type":"tool_result","id":"t1","name":"search","isError":false,"result":"found"}
+
+data: {"type":"delta","text":"Hello "}
+
+data: {"type":"delta","text":"world"}
+
+data: {"type":"done","content":"Hello world","usage":{"total_tokens":42}}
+
+",
+  "headers": {
+    "cache-control": "no-cache, no-transform",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+  },
+  "status": 200,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > chat stream with a run failure 1`] = `
+{
+  "body": "data: {"type":"start","conversationId":"conv_abc123","agent":"support"}
+
+data: {"type":"error","message":"provider exploded","code":"run_failed"}
+
+",
+  "headers": {
+    "cache-control": "no-cache, no-transform",
+    "content-type": "text/event-stream; charset=utf-8",
+    "x-accel-buffering": "no",
+  },
+  "status": 200,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > config 1`] = `
+{
+  "body": "{"agents":[{"id":"support"},{"id":"sales","name":"Sales"}],"defaultAgent":"support","allowAgentSwitch":true,"allowClientCredentials":false,"maxMessageLength":4000,"version":"<version>"}",
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  },
+  "status": 200,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > errors 1`] = `
+{
+  "agentNotAllowed": {
+    "body": "{"error":{"message":"Agent not allowed","code":"agent_not_allowed"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 403,
+  },
+  "badHistoryId": {
+    "body": "{"error":{"message":"Invalid conversationId","code":"bad_request"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 400,
+  },
+  "chatWithoutSession": {
+    "body": "{"error":{"message":"Missing or expired visitor session","code":"unauthorized"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 401,
+  },
+  "clientCredentialsOff": {
+    "body": "{"error":{"message":"Client credentials are disabled on this server","code":"bad_credentials"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 400,
+  },
+  "emptyMessage": {
+    "body": "{"error":{"message":"Message is required","code":"bad_request"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 400,
+  },
+  "foreignOrigin": {
+    "body": "{"error":{"message":"Origin not allowed","code":"forbidden_origin"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 403,
+  },
+  "invalidActions": {
+    "body": "{"error":{"message":"actions must be an array","code":"invalid_actions"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 400,
+  },
+  "linkWithoutIdentity": {
+    "body": "{"error":{"message":"Not found","code":"not_found"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 404,
+  },
+  "preflight": {
+    "body": "",
+    "headers": {
+      "access-control-allow-headers": "content-type, authorization, x-dewee-gateway-url, x-dewee-gateway-token",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
+      "access-control-allow-origin": "https://ok.test",
+      "access-control-max-age": "600",
+      "vary": "Origin",
+    },
+    "status": 204,
+  },
+  "tooLong": {
+    "body": "{"error":{"message":"Message exceeds 4000 characters","code":"too_long"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 413,
+  },
+  "unknownRoute": {
+    "body": "{"error":{"message":"Not found","code":"not_found"}}",
+    "headers": {
+      "cache-control": "no-store",
+      "content-type": "application/json; charset=utf-8",
+    },
+    "status": 404,
+  },
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > gateway unavailable 1`] = `
+{
+  "code": "gateway_error",
+  "status": 502,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > history 1`] = `
+{
+  "body": "{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"answer","thinking":"plan","toolCalls":[{"id":"t1","name":"search","arguments":{"q":"x"},"status":"done","result":"result"}]}]}",
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  },
+  "status": 200,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > session (new and refreshed) 1`] = `
+{
+  "body": "{"visitorId":"<visitor>","token":"<token>","expiresAt":"<epoch-ms>"}",
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  },
+  "status": 200,
+}
+`;
+
+exports[`legacy-gateway transport: browser responses > session (new and refreshed) 2`] = `
+{
+  "body": "{"visitorId":"<visitor>","token":"<token>","expiresAt":"<epoch-ms>"}",
+  "headers": {
+    "cache-control": "no-store",
+    "content-type": "application/json; charset=utf-8",
+  },
+  "status": 200,
+}
+`;
