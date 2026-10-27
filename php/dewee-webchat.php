@@ -9,6 +9,10 @@
  * Routes by the last path segment, so it works as /api/dewee.php/chat (PATH_INFO) or behind a
  * rewrite such as /api/dewee/chat: GET config | POST session | POST chat (SSE) | GET history | OPTIONS.
  * Implements docs/http-contract.md; mirrors the TypeScript handler in dewee-webchat/server.
+ *
+ * Transports: "ccp" (a CCP Website chat integration: DEWEE_CCP_CHAT_URL, DEWEE_WEBCHAT_INTEGRATION_ID,
+ * DEWEE_WEBCHAT_INTEGRATION_SECRET) or the deprecated "legacy-gateway" (DEWEE_GATEWAY_URL + token).
+ * Anonymous visitors only: there is no signed-in (identity) mode in PHP.
  */
 
 declare(strict_types=1);

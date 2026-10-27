@@ -1,2 +1,4 @@
+# The playground uses the deprecated legacy-gateway transport (bring-your-own-gateway panel).
+# Real sites: use a CCP Website chat integration instead (see ../../docs/migrating-to-ccp-transport.md).
 DEWEE_GATEWAY_TOKEN=
 DEWEE_WEBCHAT_SECRET=

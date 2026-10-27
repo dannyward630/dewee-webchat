@@ -15,6 +15,12 @@
   // Public settings. Secrets (DEWEE_GATEWAY_TOKEN, DEWEE_WEBCHAT_SECRET) are set with
   // `wrangler secret put`, or in .dev.vars for local runs.
   "vars": {
+    // CCP Website chat (recommended): uncomment these two, remove the legacy block below, and set the
+    // secret with `wrangler secret put DEWEE_WEBCHAT_INTEGRATION_SECRET`. Agents are chosen in CCP.
+    // "DEWEE_CCP_CHAT_URL": "https://app.dewee.sh/api/public/webchat/v1/wci_…",
+    // "DEWEE_WEBCHAT_INTEGRATION_ID": "wci_…",
+    // Deprecated direct-gateway transport, used by the hosted demo until it has a CCP integration.
+    "DEWEE_WEBCHAT_TRANSPORT": "legacy-gateway",
     "DEWEE_GATEWAY_URL": "https://dewee.zuey.me",
     "DEWEE_AGENTS": "dewee-web-advisor,zuey-ai",
     "DEWEE_DEFAULT_AGENT": "dewee-web-advisor"

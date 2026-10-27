@@ -41,8 +41,8 @@
             <p class="eyebrow">Open source · MIT · <span id="version">v0.1</span></p>
             <h1>Your Dewee agent, <span class="ink-accent">on any website.</span></h1>
             <p class="lead">
-              A chat widget that streams the agent's reasoning and tool calls, plus a tiny backend that keeps
-              your gateway token off the browser. One script tag, or a component for React, Vue, Astro and Next.js.
+              A chat widget that streams the agent's answers, plus a tiny backend that keeps your integration
+              secret off the browser. One script tag, or a component for React, Vue, Astro and Next.js.
             </p>
             <div class="cta">
               <a class="btn primary" href="#playground">Try the playground</a>
@@ -120,7 +120,8 @@ How do I add this chat to my site?</textarea>
                 <summary>Use your own gateway</summary>
                 <p class="hint">
                   Point the widget at your own Dewee gateway. The URL and key travel with each request through this
-                  demo's Worker and are never stored. Use a scoped operator API key, not an admin token.
+                  demo's Worker and are never stored. Use a scoped operator API key, not an admin token. This
+                  direct-gateway mode is deprecated; real sites use a CCP Website chat integration.
                 </p>
                 <label>Gateway URL <input name="gatewayUrl" placeholder="https://your-gateway.example.com" inputmode="url" /></label>
                 <label>API key <input name="gatewayToken" type="password" placeholder="goclaw_…" /></label>
@@ -175,19 +176,19 @@ How do I add this chat to my site?</textarea>
         <div class="wrap">
           <div class="section-head">
             <h2>Why there is a backend</h2>
-            <p>Your gateway token can run any agent and read any session. It must never reach a browser.</p>
+            <p>Your integration secret identifies your site to Dewee. It must never reach a browser.</p>
           </div>
-          <div class="flow" role="img" aria-label="Browser widget talks to your backend over HTTPS and SSE; only the backend holds the token and talks to the Dewee gateway over WebSocket.">
+          <div class="flow" role="img" aria-label="Browser widget talks to your backend over HTTPS and SSE; only the backend holds the integration secret and talks to the Dewee control plane over HTTPS and SSE.">
             <div class="node"><b>Visitor's browser</b><span>&lt;dewee-chat&gt; widget</span><small>signed visitor token only</small></div>
             <div class="arrow"><span>HTTPS + SSE</span></div>
-            <div class="node strong"><b>Your backend</b><span>/api/dewee/*</span><small>holds the gateway token</small></div>
-            <div class="arrow"><span>WebSocket</span></div>
-            <div class="node"><b>Dewee gateway</b><span>agents · MCP · tools</span><small>streams thinking + tool events</small></div>
+            <div class="node strong"><b>Your backend</b><span>/api/dewee/*</span><small>holds the integration secret</small></div>
+            <div class="arrow"><span>HTTPS + SSE</span></div>
+            <div class="node"><b>Dewee CCP</b><span>Website chat integration</span><small>agents, sign-in and limits</small></div>
           </div>
           <ul class="checks">
-            <li><b>Token stays server-side.</b> The browser gets an HMAC-signed visitor id, nothing else.</li>
-            <li><b>Visitors are isolated.</b> Each one gets its own gateway user and session keys; history is scoped to them.</li>
-            <li><b>Agent allowlist.</b> Only the agents you list can be reached, whatever the client asks for.</li>
+            <li><b>Secret stays server-side.</b> The browser gets an HMAC-signed visitor id, nothing else.</li>
+            <li><b>Visitors are isolated.</b> Each one gets its own visitor identity at Dewee; history is scoped to them.</li>
+            <li><b>Agent allowlist.</b> Only the agents the integration allows can be reached, whatever the client asks for.</li>
             <li><b>Abuse limits.</b> Origin allowlist, per-visitor rate limits, message length cap, optional Turnstile.</li>
           </ul>
         </div>

@@ -13,11 +13,15 @@ examples/php/
 ## Run locally
 
 ```sh
-cp examples/php/.env.example examples/php/.env   # fill in gateway URL, token, secret, agents
+cp examples/php/.env.example examples/php/.env   # fill in the CCP Website chat values and a secret
 php -S 127.0.0.1:8790 -t examples/php examples/php/router.php
 ```
 
 Open http://127.0.0.1:8790. Requires PHP >= 8.1 with `extension=openssl` enabled in `php.ini`.
+
+The backend uses the CCP Website chat integration (`transport: "ccp"`) and serves anonymous
+visitors only: the PHP backend has no signed-in (identity) mode. The deprecated direct-gateway
+variables are listed, commented out, at the end of `.env.example`.
 
 Under the built-in server the page uses the locally built bundle
 (`packages/dewee-webchat/dist/dewee-webchat.js`, served as `/dewee-webchat.js`) when it exists;
@@ -30,8 +34,8 @@ B=http://127.0.0.1:8790/api/dewee.php
 curl $B/config
 TOKEN=$(curl -s -X POST $B/session | sed 's/.*"token":"\([^"]*\)".*/\1/')
 curl -N -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"message":"Hi!","conversationId":"demo01"}' $B/chat
-curl -H "authorization: Bearer $TOKEN" "$B/history?conversationId=demo01"
+  -d '{"message":"Hi!","conversationId":"demo0001"}' $B/chat
+curl -H "authorization: Bearer $TOKEN" "$B/history?conversationId=demo0001"
 ```
 
 ## Deploy

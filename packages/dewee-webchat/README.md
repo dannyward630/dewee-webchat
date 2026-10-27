@@ -1,15 +1,15 @@
 # dewee-webchat
 
 Put your [Dewee](https://dewee.sh) agent on any website. A dependency-free chat widget that streams the
-agent's **reasoning** and **tool calls**, plus a small backend handler that keeps your gateway token
-off the browser.
+agent's answers (and, when you allow it, its **reasoning** and **tool calls**), plus a small backend
+handler that keeps your integration secret off the browser.
 
 **Playground:** [webchat.dewee.sh](https://webchat.dewee.sh) · **CDN:** [webchat-cdn.dewee.sh](https://webchat-cdn.dewee.sh) ·
 **Source & examples:** [github.com/nextlevelbuilder/dewee-webchat](https://github.com/nextlevelbuilder/dewee-webchat)
 
 ```
-browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ──WebSocket──▶  Dewee gateway
-   (visitor token only)                   (holds the gateway token)                (agents, MCP, tools)
+browser <dewee-chat>  ──HTTPS + SSE──▶  your backend /api/dewee/*  ──HTTPS + SSE──▶  Dewee CCP (Website chat)
+   (visitor token only)                   (holds the integration secret)            (agents, sign-in, limits)
 ```
 
 ## 1. Add the backend
@@ -47,17 +47,43 @@ PHP? Use the single-file backend in [`php/`](https://github.com/nextlevelbuilder
 
 ### Environment
 
+Create a **Website chat** integration in CCP (the Dewee control plane): choose its agents, allowed
+sites, sign-in mode, limits and whether reasoning and tool activity are shown. Its page prints the
+first three values below.
+
+| Variable | |
+|---|---|
+| `DEWEE_CCP_CHAT_URL` | The ingress URL, `https://<ccp>/api/public/webchat/v1/wci_…`. https only (plain http to `localhost` for development). |
+| `DEWEE_WEBCHAT_INTEGRATION_ID` | `wci_…`; must match the end of `DEWEE_CCP_CHAT_URL` |
+| `DEWEE_WEBCHAT_INTEGRATION_SECRET` | `dwc_…`. **Server only.** Sent only to the `DEWEE_CCP_CHAT_URL` origin, never across a redirect. |
+| `DEWEE_WEBCHAT_SECRET` | 32+ random chars to sign visitor sessions (`openssl rand -base64 32`) |
+| `DEWEE_ALLOWED_ORIGINS` | Extra origins for cross-origin embedding (same origin always works) |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Optional Cloudflare Turnstile check for new visitors |
+| `DEWEE_WEBCHAT_TRANSPORT` | Optional: `ccp` or `legacy-gateway`. Without it, the variables that are set decide. |
+
+The same values as options: `createDeweeHandler({ transport: "ccp", ccp: { chatUrl, integrationId, integrationSecret }, secret })`.
+With `ccp`, the agents come from the integration: `/config` lists them, the widget's `agent` is
+forwarded and CCP decides whether it is allowed. Errors from CCP reach the browser as the usual
+`{ error: { code, message } }` with this package's own messages; CCP's text, URLs and secrets never do.
+
+#### Legacy: direct Gateway (deprecated)
+
+`transport: "legacy-gateway"` connects straight to a Dewee Gateway with a URL and token. It still
+works and logs a deprecation warning once; see
+[docs/migrating-to-ccp-transport.md](https://github.com/nextlevelbuilder/dewee-webchat/blob/main/docs/migrating-to-ccp-transport.md).
+
 | Variable | |
 |---|---|
 | `DEWEE_GATEWAY_URL` | Gateway runtime origin, e.g. `https://gateway.example.com` |
 | `DEWEE_GATEWAY_TOKEN` | Operator API key (`operator.read,operator.write`) or gateway token. **Server only.** |
-| `DEWEE_WEBCHAT_SECRET` | 32+ random chars to sign visitor sessions (`openssl rand -base64 32`) |
+| `DEWEE_TENANT_ID` | Optional tenant UUID |
 | `DEWEE_AGENTS` | Allowlist, comma separated (`support,sales`) or `*` |
 | `DEWEE_DEFAULT_AGENT` | Optional; defaults to the first allowed agent |
-| `DEWEE_ALLOWED_ORIGINS` | Extra origins for cross-origin embedding (same origin always works) |
-| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Optional Cloudflare Turnstile check for new visitors |
+| `DEWEE_ALLOW_CLIENT_CREDENTIALS`, `DEWEE_CLIENT_CREDENTIAL_HOSTS` | "Bring your own gateway" (playgrounds only) |
 
-Create a scoped key with the Dewee CLI: `dewee api-keys create --name "website chat" --scopes operator.read,operator.write`.
+The two sets cannot be mixed: with CCP and gateway variables both set, or `transport` naming one and
+the other's variables set, the handler refuses to start rather than send a credential to an origin
+you did not pick. `agents`, `defaultAgent` and `allowClientCredentials` are refused with `ccp`.
 
 ## 2. Add the widget
 
@@ -119,8 +145,8 @@ Attributes use kebab-case (`show-reasoning="false"`), `data-*` on the script tag
 | `theme` | `light` | `light`, `dark`, `auto` |
 | `accentColor` | `#5446e8` | Any CSS color |
 | `locale` | page language | `en`, `vi` |
-| `showReasoning` | `true` | Stream the model's thinking |
-| `showToolCalls` | `true` | Show tool calls with arguments and results |
+| `showReasoning` | `true` | Stream the model's thinking (with `ccp`, only when the integration shows it) |
+| `showToolCalls` | `true` | Show tool calls with arguments and results (with `ccp`: names only, when the integration shows them) |
 | `allowAgentSwitch` | `true` | Agent picker when the backend allows several |
 | `persist` | `true` | Keep the conversation across page loads |
 | `open`, `hideBranding`, `width`, `height`, `zIndex` | | |
@@ -227,7 +253,13 @@ agent, but prompt injection through page content is still possible — do not pu
 When your site knows who the visitor is, the agent can know it too, with private tools that act for
 that user only. You pass one server-side callback. You do not mint tokens, store per-visitor
 credentials or put anything secret in the page: the handler exchanges your user for a Dewee identity
-session, and the gateway derives the user from it.
+session, and Dewee derives the user from it.
+
+With `transport: "ccp"` the same `identity` option works through CCP: the handler signs the partner
+assertion with `@dewee/identity` and CCP exchanges it for the identity session (`identity/exchange`),
+so the website needs no gateway key. `identity.agent` is optional there (the integration default is
+used), `allowInsecureHttp` does not apply, and logout or a user switch under `rebindEachRequest`
+revokes the old session at CCP. The integration's sign-in mode must allow signed-in users.
 
 ```ts
 import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
@@ -266,11 +298,11 @@ serves only anonymous visitors bundles fine (webpack, esbuild…) without it.
 | `appId`, `issuer` | Required. The Dewee application id and its issuer, exactly. |
 | `assertionSecret` \| `privateKeyJwk` (+ `algorithm`) | Exactly one: `hmac` or `jwks` application. Server only. |
 | `audience` | Optional check; must be `dewee:<appId>`. |
-| `agent` | The agent sessions are bound to. Default: `defaultAgent`, else the first of `agents`. |
+| `agent` | The agent sessions are bound to. Default: `defaultAgent`, else the first of `agents` (with `ccp`: the integration default). |
 | `required` | Default `false`. When `true`, visitors who are not signed in get no session at all. |
 | `rebindEachRequest` | Default `false`. Check the signed-in user again on every `/chat`, `/history` and `/link`. |
 | `sessionTtlSeconds` | 60 to 43200. Default: the gateway default (3600). |
-| `allowInsecureHttp` | Allow plain http to a gateway that is not loopback (private networks only). |
+| `allowInsecureHttp` | Legacy gateway only: allow plain http to a gateway that is not loopback (private networks only). |
 
 `AuthenticatedUser` has no scopes: the session exchange does not carry any. When a user's permissions
 change, report it from your server with `lifecycle({ event: "scopes_changed", … })` from
@@ -306,7 +338,7 @@ How it behaves:
   browser in the clear.
 - `authenticate` sees the request the widget sends. A widget on another origin (`allowedOrigins`)
   sends no cookies of your site, so a cookie-based `authenticate` only works same-origin.
-- `DEWEE_GATEWAY_TOKEN` must be a tenant API key without an owner: the gateway refuses an identity
+- Legacy gateway only: `DEWEE_GATEWAY_TOKEN` must be a tenant API key without an owner: the gateway refuses an identity
   session next to a key bound to a user (`IDENTITY_CONFLICT`).
 - `identity` cannot be combined with `allowClientCredentials` (the handler refuses to start). Sessions
   are bound to one agent, so `/config` turns the agent picker off.
@@ -335,14 +367,21 @@ links on its own. `dewee:link` fires with `{ expiresAt, deepLinks }`. A link tha
 progress answers `409 link_in_progress`, a reused idempotency key `409 idempotency_key_reused`, and a
 gateway with linking switched off `503 linking_unavailable`; the widget shows its own text for each.
 
-The PHP backend does not support signed-in users yet (it has no JWS signing); use the Node/Workers handler.
+The PHP backend does not support signed-in users (it has no JWS signing), with either transport; use
+the Node/Workers handler. It refuses tokens that carry an identity session.
 
 ## Security model
 
-- The gateway token never leaves your server. Browsers get an HMAC-signed visitor id.
-- Each visitor gets its own gateway user (`webchat-<id>`) and session keys, so history is private to them.
-  A [signed-in user](#signed-in-users) is the user the gateway derives from their Dewee identity session.
-- Only allowlisted agents are reachable; origin allowlist, rate limits (20 messages/min per visitor, 10
+- The integration secret (or, legacy, the gateway token) never leaves your server. Browsers get an
+  HMAC-signed visitor id; the CCP edge session travels inside it encrypted (AES-256-GCM).
+- The integration secret is sent only to the `DEWEE_CCP_CHAT_URL` origin: redirects are refused, not
+  followed, and the URL must be https (plain http only to `localhost`).
+- Each visitor gets its own visitor identity at Dewee (legacy: its own gateway user `webchat-<id>` and
+  session keys), so history is private to them. A [signed-in user](#signed-in-users) is the user Dewee
+  derives from their identity session.
+- With `ccp`, reasoning and tool activity are hidden unless the integration shows them, and tool
+  arguments and results never reach the browser.
+- Only allowed agents are reachable (the integration's, legacy: `agents`); origin allowlist, rate limits (20 messages/min per visitor, 10
   new sessions/10 min per IP by default — pass `rateLimit` for a shared store), 4000-char messages,
   optional Turnstile.
 - The client IP for per-IP limits comes from `cf-connecting-ip`, `x-real-ip` or the first

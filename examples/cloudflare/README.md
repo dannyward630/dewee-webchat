@@ -5,11 +5,17 @@ The public playground and docs page for `dewee-webchat`. One Worker serves the s
 
 - `src/worker.ts` — routes `/api/dewee/*` to `createDeweeHandler(optionsFromEnv(env))`, using
   Workers rate limiting bindings (`CHAT_LIMITER`, `SESSION_LIMITER`) shared across isolates.
-- `public/app.js` — playground controls → `element.configure()` → generated embed code.
-- `wrangler.jsonc` — vars (`DEWEE_GATEWAY_URL`, `DEWEE_AGENTS`, …) and the custom domain.
+- `public/app.js` — playground controls → `element.configure()` → generated embed code. The
+  generated server code uses the CCP Website chat variables.
+- `wrangler.jsonc` — vars and the custom domain.
 
-`DEWEE_ALLOW_CLIENT_CREDENTIALS=true` lets visitors try their own gateway from the playground. Keep it
-off on a real site.
+## Transport
+
+This Worker is the one example that stays on `transport: "legacy-gateway"` (deprecated): its
+"Use your own gateway" panel needs `DEWEE_ALLOW_CLIENT_CREDENTIALS=true`, which only the direct
+Gateway transport supports. Keep that switch off on a real site, and use a CCP Website chat
+integration instead (see the other examples and
+[docs/migrating-to-ccp-transport.md](../../docs/migrating-to-ccp-transport.md)).
 
 ## Run
 

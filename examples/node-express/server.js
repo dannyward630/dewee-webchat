@@ -1,5 +1,7 @@
-// Express backend for dewee-webchat: the gateway token stays in this process,
-// the browser only talks to /api/dewee/*.
+// Express backend for dewee-webchat: the integration secret stays in this process,
+// the browser only talks to /api/dewee/*. Configure it with the CCP Website chat variables
+// (DEWEE_CCP_CHAT_URL, DEWEE_WEBCHAT_INTEGRATION_ID, DEWEE_WEBCHAT_INTEGRATION_SECRET) and
+// DEWEE_WEBCHAT_SECRET; see the package README.
 import express from "express";
 import { createRequire } from "node:module";
 import { createDeweeHandler, optionsFromEnv, toNodeHandler } from "dewee-webchat/server";

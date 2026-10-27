@@ -1,5 +1,5 @@
 // Backend for the widget: /api/dewee/{config,session,chat,history}.
-// The gateway token stays in the Worker; the browser only sees visitor tokens.
+// The integration secret stays in the Worker; the browser only sees visitor tokens.
 import type { APIRoute } from "astro";
 import { env } from "cloudflare:workers";
 import { createDeweeHandler, optionsFromEnv } from "dewee-webchat/server";
