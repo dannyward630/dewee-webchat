@@ -62,7 +62,10 @@ writable by others. The CCP edge session lives in the visitor token (encrypted, 
 Node handler), because PHP keeps no memory between requests. `/session` reports the edge session's
 end as `expiresAt` (and `expiresIn`), so the widget asks for a new token before it lapses; that
 refresh keeps the visitor and re-seals a refreshed edge session, and chat requests do not refresh or
-open one. A returning visitor's `/session` is rate limited per visitor, a new visitor's per IP. A turn that times out, or whose visitor disconnects (seen at the next
+open one. A returning visitor's `/session` is rate limited per visitor, a new visitor's per IP, and
+with Turnstile only new visitors are challenged. CCP is told the visitor IP (`X-Dewee-Visitor-IP`)
+only when it is a well-formed address; like the per-IP limits it comes from `X-Forwarded-For`, so
+trust it only behind a proxy that overwrites that header. A turn that times out, or whose visitor disconnects (seen at the next
 write, at most 15 s later), is aborted at CCP.
 
 Array options use the TS names (`transport`, `ccp` = `['chatUrl' => …, 'integrationId' => …,

@@ -58,8 +58,8 @@ first three values below.
 | `DEWEE_WEBCHAT_INTEGRATION_SECRET` | `dwc_…`. **Server only.** Sent only to the `DEWEE_CCP_CHAT_URL` origin, never across a redirect. |
 | `DEWEE_WEBCHAT_SECRET` | 32+ random chars to sign visitor sessions (`openssl rand -base64 32`) |
 | `DEWEE_ALLOWED_ORIGINS` | Extra origins for cross-origin embedding (same origin always works) |
-| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Optional Cloudflare Turnstile check for new visitors |
-| `DEWEE_WEBCHAT_TRANSPORT` | Optional: `ccp` or `legacy-gateway`. Without it, the variables that are set decide. |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Optional Cloudflare Turnstile check for new visitors (with `ccp`, a returning visitor's hourly refresh is not challenged) |
+| `DEWEE_WEBCHAT_TRANSPORT` | Optional: `ccp` or `legacy-gateway`. Without it, the variables that are set decide (gateway variables alone select `legacy-gateway`, with a deprecation warning); set it to pin the transport explicitly. |
 
 The same values as options: `createDeweeHandler({ transport: "ccp", ccp: { chatUrl, integrationId, integrationSecret }, secret })`.
 With `ccp`, the agents come from the integration: `/config` lists them, the widget's `agent` is
@@ -322,11 +322,14 @@ How it behaves:
   your subject never reach the browser.
 - One identity session per user is kept in memory and reused until it nears expiry, so a page load
   does not cost an exchange; a session the gateway reports expired or revoked is dropped.
-- With CCP, a host that keeps no memory between requests reuses it too: the widget sends the tab's
-  last signed-in token to `/session` as `verifiedToken`, and the handler reuses its identity session
-  and edge session only when the token was issued by this backend for the user `authenticate` returns
-  now and the same agent, with more than 2 minutes left. It is never extended past its own expiry;
-  anything else is exchanged anew, and it never makes a signed-out visitor signed in.
+- With CCP, a host that keeps no memory between requests reuses it too. `/session` also returns a
+  `reuseHint`: the same sealed session in a token that is no bearer (`/chat`, `/history` and `/link`
+  refuse it). The widget keeps only that hint in the tab's `sessionStorage`, never the bearer token,
+  and sends it back as `reuseHint`. The handler reuses its identity and edge sessions only when it was
+  issued by this backend for the user `authenticate` returns now and the same agent, with more than 2
+  minutes left. It is never extended past its own expiry; anything else is exchanged anew, and it
+  never makes a signed-out visitor signed in. The legacy gateway and PHP send no hint, and the widget
+  then stores nothing.
 - `/chat` and `/history` connect to the gateway with that `identity_session` and no `user_id`, and only
   go on when the gateway confirms it derived a Dewee user (`tuc:…`); a gateway that ignored the session
   (identity switched off) gets `503 SOURCE_UNAVAILABLE` and nothing runs. The same user gets the same
@@ -338,19 +341,25 @@ How it behaves:
   `401 IDENTITY_REQUIRED` (the widget then asks `/session` again), and a throwing `authenticate` is
   `503 SOURCE_UNAVAILABLE`. Turn it on when your login is a cookie: a widget token replayed under
   another user's cookie is then useless. With CCP, another user also revokes the previous user's
-  session at CCP; a request with no user (signed out, or sent without the cookie) is only refused,
-  because the session may still be in use on the user's other devices.
-- Logout: call `revoke` on the handler from your logout route, with the user's subject and the
-  logout request. It forgets the identity sessions the handler holds for that user and, with CCP,
-  revokes them at CCP (`identity/revoke`), so the user's tokens stop working on every device. On a
-  host without shared memory it reaches the sessions this instance holds; the others end when they
-  expire. The legacy gateway has no revoke call, so there it only forgets them.
+  session at CCP. That is the old user's one shared session, so it ends on their other devices too;
+  their widget gets a `401` there and exchanges a new one at `/session`. A request with no user
+  (signed out, or sent without the cookie) is only refused, because the session may still be in use
+  on the user's other devices.
+- Logout: call `revoke(subject, request, hint?)` on the handler from your logout route. It forgets
+  the identity sessions the handler holds for that user and, with CCP, revokes them at CCP
+  (`identity/revoke`), so the user's tokens stop working on every device. On a host without shared
+  memory, have the logout page send the widget's hint (`chat.reuseHint()`) along: the session in it
+  is revoked when it belongs to that subject. Pass the logout request so CCP sees the visitor's
+  origin (an integration with an origin allowlist needs it; without a request, the origin the
+  session was issued for is used). Sessions held only by other instances end when they expire. The
+  legacy gateway has no revoke call, so there it only forgets them.
 
   ```ts
-  // `handler` from the example above
+  // `handler` from the example above; the logout page posts { hint: chat.reuseHint() }
   export async function logout(req: Request) {
     const user = await getUserFromSessionCookie(req.headers.get("cookie"));
-    if (user) await handler.revoke(user.id, req); // the same subject authenticate returns
+    const { hint } = await req.clone().json().catch(() => ({}));
+    if (user) await handler.revoke(user.id, req, typeof hint === "string" ? hint : undefined); // the subject authenticate returns
     // …then clear your own session cookie
   }
   ```
@@ -374,9 +383,9 @@ How it behaves:
   `{ error: { code, remediation } }`. The widget shows its own localized message and, on `LINK_EXPIRED`
   or `LINK_REVOKED`, asks `/session` again.
 - The widget uses a signed-in session from memory, so each page load asks your backend who the
-  visitor is. With CCP it also keeps the tab's last signed-in token in `sessionStorage` (never
-  `localStorage`) as the reuse hint above, and drops it when `/session` answers anonymously or `401`,
-  or a request with it is refused. It refreshes the session `min(60 s, lifetime/2)` before it ends, counting the lifetime
+  visitor is. When `/session` returns a `reuseHint` (CCP only), it keeps that hint, and nothing
+  else, in `sessionStorage` (never `localStorage`), and drops it when `/session` answers anonymously
+  or `401`, or a signed-in request is refused. It refreshes the session `min(60 s, lifetime/2)` before it ends, counting the lifetime
   (`expiresIn`) from when it received it. Call `chat.renewSession()` after a sign-in or sign-out
   without a page load.
 - Rate limits (default, in memory): 120 `authenticate` calls per IP per minute (checked before
@@ -384,7 +393,8 @@ How it behaves:
   10 minutes. A visitor who is not signed in and still has a valid anonymous token gets it back as is;
   only minting a new one counts against the 10 per IP per 10 minutes. With CCP, refreshing a
   returning visitor's token counts per visitor instead, so visitors behind one address do not use up
-  the budget of new ones. A custom `rateLimit` receives the
+  the budget of new ones. CCP's own per-IP budget still applies to edge session creates: a visitor
+  back after more than a day (past CCP's refresh window) gets a new edge session, which counts there. A custom `rateLimit` receives the
   buckets `preauth`, `verified` and `link` besides `session` and `chat`.
 - Keep `authenticate` cheap or cached (a signed-cookie check, not a database round trip per call): it
   runs on every `/session`, so on every page load, and with `rebindEachRequest` on every `/chat`,
@@ -416,8 +426,10 @@ the Node/Workers handler. It refuses tokens that carry an identity session.
   new sessions/10 min per IP by default — pass `rateLimit` for a shared store), 4000-char messages,
   optional Turnstile.
 - The client IP for per-IP limits comes from `cf-connecting-ip`, `x-real-ip` or the first
-  `x-forwarded-for` entry. These headers are only trustworthy behind a proxy that sets them (as
-  before signed-in users existed); elsewhere a client can choose its own IP.
+  `x-forwarded-for` entry. These headers are only trustworthy behind a proxy that overwrites them
+  (as before signed-in users existed); elsewhere a client can choose its own IP, both for this
+  backend's limits and for the address CCP is told (`X-Dewee-Visitor-IP`, sent only when it is a
+  well-formed IP address).
 - "Bring your own gateway" (`allowClientCredentials`) is off by default; when on, internal hosts are refused.
 
 The wire format is documented in [docs/http-contract.md](https://github.com/nextlevelbuilder/dewee-webchat/blob/main/docs/http-contract.md).
