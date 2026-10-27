@@ -134,6 +134,18 @@ describe("Turnstile on refresh", () => {
     expect(turnstile).toHaveBeenCalledTimes(1);
   });
 
+  it("still challenges a refresh when the backend signs users in, since that refresh may sign one in", async () => {
+    vi.useFakeTimers({ now: 1_000_000_000_000, toFake: ["Date"] });
+    const turnstile = vi.fn(async () => "ts-token");
+    const b = backend(true, anon, { turnstileSiteKey: "site-key", refreshWithoutTurnstile: true });
+    await visit(b, turnstile);
+    vi.setSystemTime(Date.now() + 58 * 60_000);
+    await visit(b, turnstile);
+    expect(b.bodies.map((x) => x.turnstileToken)).toEqual(["ts-token", "ts-token"]);
+    expect(b.bodies[1].token).toBe("anon1");
+    expect(turnstile).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps challenging every refresh when the backend does not say otherwise, and retries with one when asked", async () => {
     vi.useFakeTimers({ now: 1_000_000_000_000, toFake: ["Date"] });
     const turnstile = vi.fn(async () => "ts-token");

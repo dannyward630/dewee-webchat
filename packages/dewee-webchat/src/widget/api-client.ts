@@ -219,8 +219,9 @@ export class ApiClient {
     let s: SessionResponse;
     try {
       // A returning anonymous visitor refreshes without a challenge when the backend says it needs
-      // none; should it ask for one anyway (turnstile_failed), it gets it on the retry.
-      if (cfg.turnstileSiteKey && !(cfg.refreshWithoutTurnstile && body.token && !body.reuseHint)) await challenge();
+      // none; should it ask for one anyway (turnstile_failed), it gets it on the retry. A backend that
+      // signs users in may turn the same refresh into a sign-in, which is always challenged.
+      if (cfg.turnstileSiteKey && !(cfg.refreshWithoutTurnstile && !cfg.identity && body.token && !body.reuseHint)) await challenge();
       try {
         s = await post();
       } catch (e) {

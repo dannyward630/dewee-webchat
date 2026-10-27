@@ -75,7 +75,8 @@ export interface PublicConfig {
   identity?: boolean;
   /**
    * Present (true) when a returning visitor's `/session` refresh (a valid anonymous `token` in the
-   * body) needs no Turnstile token (ccp transport); only new visitors are challenged then.
+   * body) needs no Turnstile token (ccp transport); only new visitors are challenged then. With
+   * `identity` the widget still challenges: a signed-in user's `/session` always needs a token.
    */
   refreshWithoutTurnstile?: boolean;
 }
