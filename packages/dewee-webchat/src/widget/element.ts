@@ -445,6 +445,14 @@ export class DeweeChatElement extends ElementBase {
   }
 
   /**
+   * The tab's signed-in reuse hint, or null. Not a credential: send it to your logout route for
+   * `handler.revoke(subject, request, hint)`, which then ends exactly that session.
+   */
+  reuseHint(): string | null {
+    return this.client().reuseHint();
+  }
+
+  /**
    * Web-first linking for a signed-in user: shows a proof code and the chat apps to send it to
    * ("Continue on Telegram"). The user never types an account id. Resolves null on failure (the
    * error is shown in the chat and emitted as `dewee:error`).

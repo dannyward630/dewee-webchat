@@ -58,9 +58,9 @@ const storage = (pick: () => Storage) => ({
 /** The anonymous visitor session, kept across visits. */
 const store = storage(() => localStorage);
 /**
- * The last signed-in token of this tab, kept only as a reuse hint for `/session` (`verifiedToken`):
- * the backend checks it against the user it authenticates and never answers from it alone, so a
- * sign-out or another user never inherits it. Requests always use the session `/session` returned.
+ * The reuse hint of this tab's last signed-in session (`SessionResponse.reuseHint`), present only
+ * when the backend sends one (ccp transport). It is not a bearer token: the backend accepts it only at
+ * `/session`, for the user it authenticates then. Requests use the session `/session` returned.
  */
 const tabStore = storage(() => sessionStorage);
 
@@ -81,8 +81,17 @@ export class ApiClient {
     return `dewee-webchat:session:${this.o.endpoint}`;
   }
 
-  private get verifiedKey(): string {
-    return `dewee-webchat:verified:${this.o.endpoint}`;
+  private get reuseKey(): string {
+    return `dewee-webchat:reuse:${this.o.endpoint}`;
+  }
+
+  /**
+   * The tab's reuse hint for signed-in sessions, or null (none sent by this backend). A logout page can
+   * send it to the backend's logout route, whose `handler.revoke(subject, request, hint)` then ends
+   * exactly that session.
+   */
+  reuseHint(): string | null {
+    return tabStore.get(this.reuseKey);
   }
 
   private request(url: string, init: RequestInit): Promise<Response> {
@@ -190,21 +199,30 @@ export class ApiClient {
     const previous = this.session && !this.session.verified ? this.session : this.stored();
     if (previous?.token) body.token = previous.token;
     if (cfg.identity) {
-      const verified = this.session?.verified ? this.session.token : tabStore.get(this.verifiedKey);
-      if (verified) body.verifiedToken = verified;
+      const hint = this.session?.verified ? this.session.reuseHint : tabStore.get(this.reuseKey);
+      if (hint) body.reuseHint = hint;
     }
-    if (cfg.turnstileSiteKey) {
+    const post = async () =>
+      this.parse<SessionResponse>(await this.request(this.url("session"), { method: "POST", headers: await this.headers(), body: JSON.stringify(body) }));
+    const challenge = async () => {
       if (!this.o.turnstile) throw new ApiError("Verification is required but no Turnstile handler is set", 403, "turnstile_required");
-      body.turnstileToken = await this.o.turnstile(cfg.turnstileSiteKey);
-    }
+      body.turnstileToken = await this.o.turnstile(cfg.turnstileSiteKey!);
+    };
     let s: SessionResponse;
     try {
-      s = await this.parse<SessionResponse>(
-        await this.request(this.url("session"), { method: "POST", headers: await this.headers(), body: JSON.stringify(body) }),
-      );
+      // A returning anonymous visitor refreshes without a challenge when the backend says it needs
+      // none; should it ask for one anyway (turnstile_failed), it gets it on the retry.
+      if (cfg.turnstileSiteKey && !(cfg.refreshWithoutTurnstile && body.token && !body.reuseHint)) await challenge();
+      try {
+        s = await post();
+      } catch (e) {
+        if (!(cfg.turnstileSiteKey && !body.turnstileToken && e instanceof ApiError && e.code === "turnstile_failed")) throw e;
+        await challenge();
+        s = await post();
+      }
     } catch (e) {
       // Nobody is signed in (or sign-in is required): the hint has no user left to serve.
-      if (e instanceof ApiError && e.status === 401) tabStore.del(this.verifiedKey);
+      if (e instanceof ApiError && e.status === 401) tabStore.del(this.reuseKey);
       throw e;
     }
     // obtainedAt lets fresh() size the refresh margin to the server's token lifetime.
@@ -212,13 +230,16 @@ export class ApiClient {
     const held: HeldSession = { ...s, obtainedAt: now };
     this.session = held;
     // A signed-in session is used from memory only: the next page load asks the backend again, so a
-    // sign-out or a different user never inherits it. Its token stays in the tab as a reuse hint.
+    // sign-out or a different user never inherits it. Only its reuse hint, when the backend sent one,
+    // stays in the tab; the bearer token is never stored.
     if (held.verified) {
       this.scheduleRefresh(held, now);
-      tabStore.set(this.verifiedKey, held.token);
+      if (typeof held.reuseHint === "string" && held.reuseHint !== "") tabStore.set(this.reuseKey, held.reuseHint);
+      else tabStore.del(this.reuseKey);
     } else {
-      tabStore.del(this.verifiedKey);
-      store.set(this.storageKey, JSON.stringify(held));
+      tabStore.del(this.reuseKey);
+      const { reuseHint: _none, ...anonymous } = held;
+      store.set(this.storageKey, JSON.stringify(anonymous));
     }
     return held;
   }
@@ -227,7 +248,7 @@ export class ApiClient {
   forgetSession(): void {
     if (this.session?.verified) {
       // Refused by the backend: never offered again as a reuse hint.
-      tabStore.del(this.verifiedKey);
+      tabStore.del(this.reuseKey);
       this.session = null;
       return;
     }

@@ -3,12 +3,12 @@
 // must cost at most one CCP session refresh or create per page session, and a signed-in user's page
 // loads must reuse the identity session instead of exchanging every time, without ever handing one
 // user's session to another or answering a refused signed-in user anonymously.
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatStreamEvent } from "../src/protocol";
 import { createDeweeHandler, verifyVisitorToken, type DeweeHandlerOptions, type DeweeIdentityOptions, type RateLimiter } from "../src/server";
 import { EDGE_RESEAL_MS } from "../src/server/ccp-transport";
 import { deweeIdentitySdk } from "../src/server/identity";
-import { signVisitorToken } from "../src/server/security";
+import { signReuseHint, signVisitorToken } from "../src/server/security";
 import { APP_ID, ASSERTION_SECRET, INTEGRATION_ID, INTEGRATION_SECRET, ISSUER, mintEdge, startFakeCcp, type FakeCcp } from "./helpers/fake-ccp-ingress";
 
 const VISITOR_SECRET = "visitor-secret-NEVER-IN-BROWSER-00000000001";
@@ -161,23 +161,79 @@ describe("stateless host: returning anonymous visitor", () => {
   });
 });
 
+describe("ccp /session edges", () => {
+  const turnstile = { siteKey: "site-key", secretKey: "turnstile-secret-NEVER-IN-BROWSER" };
+
+  it("challenges new visitors with Turnstile but lets a returning visitor refresh without one", async () => {
+    const h = stateless({ turnstile });
+    const cfg = (await h(new Request(`${BASE}/config`))).json();
+    expect(cfg).toMatchObject({ turnstileSiteKey: "site-key", refreshWithoutTurnstile: true });
+    const fresh = await session(h);
+    expect([fresh.status, fresh.json().error.code]).toEqual([403, "turnstile_failed"]);
+    const { token } = await agedToken("visitor_turnstile_1", DAY, 2 * 3600_000);
+    const r = await session(h, { token });
+    expect(r.status).toBe(200);
+    expect(r.json().visitorId).toBe("visitor_turnstile_1");
+    // An expired or forged token is no proof.
+    expect((await session(h, { token: `${token.slice(0, -2)}xx` })).status).toBe(403);
+  });
+
+  it("keeps the legacy gateway transport challenging every /session", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const h = createDeweeHandler({ gatewayUrl: "https://gw.example.com", token: "gw-token", agents: ["shop"], secret: VISITOR_SECRET, rateLimit: false, turnstile });
+      const cfg = await (await h(new Request(`${BASE}/config`))).json();
+      expect(cfg.refreshWithoutTurnstile).toBeUndefined();
+      const token = await signVisitorToken(VISITOR_SECRET, { v: "visitor_turnstile_2", exp: Date.now() + DAY });
+      const r = await h(new Request(`${BASE}/session`, { method: "POST", body: JSON.stringify({ token }) }));
+      expect(r.status).toBe(403);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("sends CCP the visitor IP only in CCP's address format", async () => {
+    const h = stateless();
+    const post = (xff: string) => h(new Request(`${BASE}/session`, { method: "POST", headers: { "x-forwarded-for": xff }, body: "{}" }));
+    await post("2001:db8::7");
+    await post("evil<script>");
+    expect(ccp.routes("session").map((r) => r.headers["x-dewee-visitor-ip"])).toEqual(["2001:db8::7", undefined]);
+  });
+
+  it("answers an unexpected failure without its detail", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const h = stateless({ rateLimit: () => { throw new Error("limiter store at redis://10.0.0.5 down"); } });
+      const r = await session(h);
+      expect(r.status).toBe(500);
+      expect(r.json()).toEqual({ error: { message: "Internal error", code: "internal" } });
+    } finally {
+      err.mockRestore();
+    }
+  });
+});
+
 describe("stateless host: signed-in user", () => {
   beforeEach(() => {
     ccp.state.config = { ...ccp.state.config, mode: "signed_in_optional", identity_enabled: true };
   });
 
-  it("reuses the identity and edge sessions of the tab's previous token across cold page loads", async () => {
+  it("reuses the identity and edge sessions of the tab's reuse hint across cold page loads", async () => {
     const h = stateless({}, {});
     const first = (await session(h, {}, "user-a")).json();
     expect(first.verified).toBe(true);
+    expect(first.reuseHint).toEqual(expect.any(String));
+    expect(first.reuseHint).not.toBe(first.token);
+    let hint = first.reuseHint;
     let token = first.token;
     for (let i = 0; i < 12; i++) {
-      const s = (await session(h, { verifiedToken: token }, "user-a")).json();
+      const s = (await session(h, { reuseHint: hint }, "user-a")).json();
       expect(s.verified).toBe(true);
       expect(s.visitorId).toBe(first.visitorId);
       expect((await claims(s.token))?.ids).toBe((await claims(first.token))?.ids);
       // never stretched past the identity session's own end
       expect((await claims(s.token))!.exp).toBeLessThanOrEqual((await claims(first.token))!.exp);
+      hint = s.reuseHint;
       token = s.token;
     }
     expect(ccp.routes("identity/exchange")).toHaveLength(1);
@@ -185,10 +241,29 @@ describe("stateless host: signed-in user", () => {
     expect(sse((await chat(h, token, "user-a")).text).at(-1)?.type).toBe("done");
   });
 
+  it("refuses the reuse hint as a bearer on every route, and the bearer token as a reuse hint", async () => {
+    const h = stateless({}, {});
+    const a = (await session(h, {}, "user-a")).json();
+    const bearer = (path: string, method = "GET", body?: unknown) =>
+      h(new Request(`${BASE}/${path}`, { method, headers: { authorization: `Bearer ${a.reuseHint}`, cookie: "uid=user-a" }, ...(body ? { body: JSON.stringify(body) } : {}) }));
+    expect((await bearer("chat", "POST", { message: "hi", conversationId: "conv_hint_00001" })).status).toBe(401);
+    expect((await bearer("history?agent=shop&conversationId=conv_hint_00001")).status).toBe(401);
+    expect((await bearer("link", "POST", {})).status).toBe(401);
+    expect(ccp.routes("chat")).toHaveLength(0);
+    expect(ccp.routes("history")).toHaveLength(0);
+    expect(ccp.routes("link")).toHaveLength(0);
+    // Nor is it ever an anonymous visitor's token to refresh.
+    const anon = (await session(stateless(), { token: a.reuseHint })).json();
+    expect(anon.visitorId).not.toBe(a.visitorId);
+    // The bearer token offered as a hint is ignored: the user is exchanged again.
+    expect((await session(h, { reuseHint: a.token }, "user-a")).json().verified).toBe(true);
+    expect(ccp.routes("identity/exchange")).toHaveLength(2);
+  });
+
   it("never reuses another user's session: a hint under a different login exchanges for that user", async () => {
     const h = stateless({}, {});
     const a = (await session(h, {}, "user-a")).json();
-    const b = (await session(h, { verifiedToken: a.token }, "user-b")).json();
+    const b = (await session(h, { reuseHint: a.reuseHint }, "user-b")).json();
     expect(b.verified).toBe(true);
     expect(b.visitorId).not.toBe(a.visitorId);
     expect((await claims(b.token))?.ids).not.toBe((await claims(a.token))?.ids);
@@ -199,12 +274,13 @@ describe("stateless host: signed-in user", () => {
 
   it("a hint with no one signed in gives a new anonymous visitor, and 401 when sign-in is required", async () => {
     const a = (await session(stateless({}, {}), {}, "user-a")).json();
-    const anon = (await session(stateless({}, {}), { verifiedToken: a.token })).json();
+    const anon = (await session(stateless({}, {}), { reuseHint: a.reuseHint })).json();
     expect(anon.verified).toBeUndefined();
+    expect(anon.reuseHint).toBeUndefined();
     expect(anon.visitorId).not.toBe(a.visitorId);
     expect((await claims(anon.token))?.ids).toBeUndefined();
 
-    const required = await session(stateless({}, { required: true }), { verifiedToken: a.token, token: a.token });
+    const required = await session(stateless({}, { required: true }), { reuseHint: a.reuseHint, token: a.token });
     expect(required.status).toBe(401);
     expect(required.json().error.code).toBe("IDENTITY_REQUIRED");
   });
@@ -213,11 +289,11 @@ describe("stateless host: signed-in user", () => {
     const h = stateless({}, {});
     const a = (await session(h, {}, "user-a")).json();
     const c = (await claims(a.token))!;
-    const tampered = `${a.token.slice(0, -2)}xx`;
-    const expiring = await signVisitorToken(VISITOR_SECRET, { ...c, exp: Date.now() + 60_000 });
-    const otherAgent = await signVisitorToken(VISITOR_SECRET, { ...c, ida: "support" });
+    const tampered = `${a.reuseHint.slice(0, -2)}xx`;
+    const expiring = await signReuseHint(VISITOR_SECRET, { ...c, exp: Date.now() + 60_000 });
+    const otherAgent = await signReuseHint(VISITOR_SECRET, { ...c, ida: "support" });
     for (const hint of [tampered, expiring, otherAgent]) {
-      const s = (await session(h, { verifiedToken: hint }, "user-a")).json();
+      const s = (await session(h, { reuseHint: hint }, "user-a")).json();
       expect(s.verified).toBe(true);
     }
     expect(ccp.routes("identity/exchange")).toHaveLength(4);
@@ -227,7 +303,7 @@ describe("stateless host: signed-in user", () => {
     const h = stateless({}, {});
     const a = (await session(h, {}, "user-a")).json();
     for (const s of ccp.state.identitySessions.values()) s.revoked = true;
-    const again = (await session(h, { verifiedToken: a.token }, "user-a")).json();
+    const again = (await session(h, { reuseHint: a.reuseHint }, "user-a")).json();
     const r = await chat(h, again.token, "user-a");
     expect(r.status).toBe(401);
     expect(r.json().error.code).toBe("LINK_REVOKED");
@@ -235,5 +311,27 @@ describe("stateless host: signed-in user", () => {
     // Without the hint (the widget drops it on that refusal) the next page load exchanges again.
     expect((await session(h, {}, "user-a")).json().verified).toBe(true);
     expect(ccp.routes("identity/exchange")).toHaveLength(2);
+  });
+
+  it("revoke with the logout page's hint ends that exact session on a host that holds nothing", async () => {
+    const opts = (): DeweeHandlerOptions => ({
+      ccp: { chatUrl: ccp.url, integrationId: INTEGRATION_ID, integrationSecret: INTEGRATION_SECRET },
+      secret: VISITOR_SECRET,
+      rateLimit: false,
+      identity: { sdk: deweeIdentitySdk, authenticate: cookieUser, appId: APP_ID, issuer: ISSUER, assertionSecret: ASSERTION_SECRET },
+    });
+    const h = stateless({}, {});
+    const a = (await session(h, {}, "user-a")).json();
+    const ids = (await claims(a.token))?.ids;
+    // Another user's subject never revokes it.
+    await createDeweeHandler(opts()).revoke("user-b", undefined, a.reuseHint);
+    expect(ccp.routes("identity/revoke")).toHaveLength(0);
+    await createDeweeHandler(opts()).revoke("user-a", new Request(`${BASE}/logout`, { headers: { origin: "https://shop.example" } }), a.reuseHint);
+    expect(ccp.routes("identity/revoke").map((r) => r.body)).toEqual([{ identity_session: ids, agent: "shop" }]);
+    expect(ccp.routes("identity/revoke")[0].headers["x-dewee-visitor-origin"]).toBe("https://shop.example");
+    expect((await chat(h, a.token, "user-a")).json().error.code).toBe("LINK_REVOKED");
+    // A token that does not verify is ignored.
+    await createDeweeHandler(opts()).revoke("user-a", undefined, "not-a-token");
+    expect(ccp.routes("identity/revoke")).toHaveLength(1);
   });
 });

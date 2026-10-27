@@ -200,6 +200,19 @@ describe("ccp identity: rebinding and logout", () => {
     await expect(raw.revoke("user-a")).resolves.toBeUndefined();
   });
 
+  it("revoke(subject) without a request tells CCP the origin the session was issued for", async () => {
+    const raw = createDeweeHandler({
+      ccp: { chatUrl: ccp.url, integrationId: INTEGRATION_ID, integrationSecret: INTEGRATION_SECRET },
+      secret: VISITOR_SECRET,
+      rateLimit: false,
+      identity: { sdk: deweeIdentitySdk, authenticate: cookieUser, appId: APP_ID, issuer: ISSUER, assertionSecret: ASSERTION_SECRET },
+    });
+    await raw(new Request(`${BASE}/session`, { method: "POST", headers: { cookie: "uid=user-a", origin: "https://shop.example" }, body: "{}" }));
+    await raw.revoke("user-a");
+    expect(ccp.routes("identity/revoke")).toHaveLength(1);
+    expect(ccp.routes("identity/revoke")[0].headers["x-dewee-visitor-origin"]).toBe("https://shop.example");
+  });
+
   it("answers 503 when the login check fails during rebinding", async () => {
     const h = makeHandler({ rebindEachRequest: true });
     const a = (await session(h, "user-a")).json();

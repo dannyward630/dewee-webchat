@@ -56,6 +56,11 @@ export interface PublicConfig {
   version: string;
   /** Present (true) when the backend signs users in through Dewee: the widget then asks `/session` on every page load. */
   identity?: boolean;
+  /**
+   * Present (true) when a returning visitor's `/session` refresh (a valid anonymous `token` in the
+   * body) needs no Turnstile token (ccp transport); only new visitors are challenged then.
+   */
+  refreshWithoutTurnstile?: boolean;
 }
 
 /** Response of `POST {basePath}/session`. */
@@ -69,10 +74,17 @@ export interface SessionResponse {
   expiresAt: number;
   /**
    * Present (true) when the session carries a verified Dewee identity. Such sessions are short-lived and
-   * are used from memory only; the tab keeps the last token as a reuse hint for `/session`, which the
-   * backend checks against the user it authenticates.
+   * are used from memory only.
    */
   verified?: boolean;
+  /**
+   * ccp transport, verified sessions only: an opaque token that lets a later page load of this tab
+   * reuse the session instead of exchanging a new one. It is no bearer token (every route but
+   * `/session` refuses it), and `/session` uses it only for the user the host authenticates at that
+   * moment. The widget keeps it in `sessionStorage` and sends it back as `reuseHint`; it stores
+   * nothing when the answer has none (legacy gateway, PHP).
+   */
+  reuseHint?: string;
   /**
    * Verified sessions, and every session of the ccp transport: milliseconds until `expiresAt`, counted
    * from when the response is received. The widget refreshes from this rather than `expiresAt`, so a

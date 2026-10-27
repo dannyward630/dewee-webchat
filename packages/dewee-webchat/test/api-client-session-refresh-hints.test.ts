@@ -1,20 +1,21 @@
 // @vitest-environment happy-dom
 // How the browser client sizes its /session refreshes from the backend's refresh hint (`expiresIn`)
-// and carries the tab's signed-in token as a reuse hint (`verifiedToken`) across page loads.
+// carries the tab's signed-in reuse hint (`reuseHint`, never the bearer token) across page loads, and
+// refreshes a returning visitor without a Turnstile challenge when the backend allows it.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiClient } from "../src/index";
+import { ApiClient, defineDeweeChat, type DeweeChatElement } from "../src/index";
 
 const jsonRes = (status: number, v: unknown) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
-const VERIFIED_KEY = "dewee-webchat:verified:/api/dewee";
+const HINT_KEY = "dewee-webchat:reuse:/api/dewee";
 
 type SessionAnswer = (n: number) => Response;
 
 /** A backend recording each /session body; `answer` decides each /session response. */
-function backend(identity: boolean, answer: SessionAnswer) {
+function backend(identity: boolean, answer: SessionAnswer, extraConfig: Record<string, unknown> = {}) {
   const bodies: Array<Record<string, string>> = [];
   const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     const path = new URL(String(url), "https://site.test").pathname.replace("/api/dewee/", "");
-    if (path === "config") return jsonRes(200, { agents: [{ id: "shop" }], defaultAgent: "shop", allowAgentSwitch: false, allowClientCredentials: false, maxMessageLength: 4000, version: "test", ...(identity ? { identity: true } : {}) });
+    if (path === "config") return jsonRes(200, { agents: [{ id: "shop" }], defaultAgent: "shop", allowAgentSwitch: false, allowClientCredentials: false, maxMessageLength: 4000, version: "test", ...(identity ? { identity: true } : {}), ...extraConfig });
     if (path === "session") {
       bodies.push(JSON.parse(String(init?.body ?? "{}")));
       return answer(bodies.length);
@@ -59,37 +60,107 @@ describe("anonymous refresh hint", () => {
 });
 
 describe("signed-in reuse hint", () => {
-  const verified = (n: number) => jsonRes(200, { visitorId: "v_member_01", token: `member${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000, verified: true });
+  const verified = (n: number, extra: Record<string, unknown> = { reuseHint: `hint${n}` }) =>
+    jsonRes(200, { visitorId: "v_member_01", token: `member${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000, verified: true, ...extra });
 
-  it("sends the tab's previous signed-in token on the next page load, and never stores it in localStorage", async () => {
-    const b = backend(true, verified);
+  it("keeps only the reuse hint in the tab and sends it on the next page load; the bearer token is never stored", async () => {
+    const b = backend(true, (n) => verified(n));
+    const api = page(b.fetch);
+    await api.ensureSession();
+    expect(b.bodies[0].reuseHint).toBeUndefined();
+    expect(sessionStorage.getItem(HINT_KEY)).toBe("hint1");
+    expect(api.reuseHint()).toBe("hint1");
+    const stored = JSON.stringify({ ...localStorage, ...sessionStorage });
+    expect(stored).not.toContain("member1");
     await page(b.fetch).ensureSession();
-    expect(b.bodies[0].verifiedToken).toBeUndefined();
-    expect(sessionStorage.getItem(VERIFIED_KEY)).toBe("member1");
-    expect(JSON.stringify({ ...localStorage })).not.toContain("member1");
-    await page(b.fetch).ensureSession();
-    expect(b.bodies[1].verifiedToken).toBe("member1");
-    expect(sessionStorage.getItem(VERIFIED_KEY)).toBe("member2");
+    expect(b.bodies[1].reuseHint).toBe("hint1");
+    expect(JSON.stringify(b.bodies[1])).not.toContain("member1");
+    expect(sessionStorage.getItem(HINT_KEY)).toBe("hint2");
+  });
+
+  it("writes nothing to sessionStorage when the backend sends no hint (legacy gateway, PHP)", async () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem");
+    try {
+      const b = backend(true, (n) => verified(n, {}));
+      await page(b.fetch).ensureSession();
+      await page(b.fetch).ensureSession();
+      expect(setItem.mock.calls.filter(([k]) => String(k).startsWith("dewee-webchat:reuse:"))).toHaveLength(0);
+      expect(sessionStorage.length).toBe(0);
+      expect(b.bodies.every((x) => x.reuseHint === undefined)).toBe(true);
+    } finally {
+      setItem.mockRestore();
+    }
   });
 
   it("drops the hint when the backend answers anonymously or refuses the session", async () => {
     const anon = backend(true, (n) => (n === 1 ? verified(n) : jsonRes(200, { visitorId: "v_anon_003", token: "anon", expiresAt: Date.now() + 3_600_000 })));
     await page(anon.fetch).ensureSession();
     await page(anon.fetch).ensureSession();
-    expect(sessionStorage.getItem(VERIFIED_KEY)).toBeNull();
+    expect(sessionStorage.getItem(HINT_KEY)).toBeNull();
 
     const refused = backend(true, (n) => (n === 1 ? verified(n) : jsonRes(401, { error: { code: "IDENTITY_REQUIRED", message: "sign in" } })));
     await page(refused.fetch).ensureSession();
     await expect(page(refused.fetch).ensureSession()).rejects.toMatchObject({ status: 401 });
-    expect(sessionStorage.getItem(VERIFIED_KEY)).toBeNull();
+    expect(sessionStorage.getItem(HINT_KEY)).toBeNull();
   });
 
   it("drops the hint of a session the backend refused on chat, so the renewal does not offer it again", async () => {
-    const b = backend(true, (n) => jsonRes(200, { visitorId: "v_member_01", token: n === 1 ? "revoked" : `member${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000, verified: true }));
+    const b = backend(true, (n) => jsonRes(200, { visitorId: "v_member_01", token: n === 1 ? "revoked" : `member${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000, verified: true, reuseHint: `hint${n}` }));
     const api = page(b.fetch);
     await api.chat({ agent: "shop", conversationId: "conv_hint_0001", message: "hi" }, () => {});
     expect(b.bodies).toHaveLength(2);
-    expect(b.bodies[1].verifiedToken).toBeUndefined();
-    expect(sessionStorage.getItem(VERIFIED_KEY)).toBe("member2");
+    expect(b.bodies[1].reuseHint).toBeUndefined();
+    expect(sessionStorage.getItem(HINT_KEY)).toBe("hint2");
+  });
+});
+
+describe("Turnstile on refresh", () => {
+  const anon = (n: number) => jsonRes(200, { visitorId: "v_anon_010", token: `anon${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000 });
+  const visit = async (b: ReturnType<typeof backend>, turnstile: () => Promise<string>) => {
+    await new ApiClient({ endpoint: "/api/dewee", fetch: b.fetch, turnstile }).ensureSession();
+  };
+
+  it("challenges a new visitor, and refreshes a returning one without a challenge when the backend allows it", async () => {
+    vi.useFakeTimers({ now: 1_000_000_000_000, toFake: ["Date"] });
+    const turnstile = vi.fn(async () => "ts-token");
+    const b = backend(false, anon, { turnstileSiteKey: "site-key", refreshWithoutTurnstile: true });
+    await visit(b, turnstile);
+    expect(turnstile).toHaveBeenCalledTimes(1);
+    expect(b.bodies[0].turnstileToken).toBe("ts-token");
+    vi.setSystemTime(Date.now() + 58 * 60_000);
+    await visit(b, turnstile);
+    expect(b.bodies).toHaveLength(2);
+    expect(b.bodies[1]).toEqual({ token: "anon1" });
+    expect(turnstile).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps challenging every refresh when the backend does not say otherwise, and retries with one when asked", async () => {
+    vi.useFakeTimers({ now: 1_000_000_000_000, toFake: ["Date"] });
+    const turnstile = vi.fn(async () => "ts-token");
+    const legacy = backend(false, anon, { turnstileSiteKey: "site-key" });
+    await visit(legacy, turnstile);
+    vi.setSystemTime(Date.now() + 58 * 60_000);
+    await visit(legacy, turnstile);
+    expect(legacy.bodies[1]).toEqual({ token: "anon1", turnstileToken: "ts-token" });
+
+    localStorage.clear();
+    turnstile.mockClear();
+    const strict = backend(false, (n) => (n === 2 ? jsonRes(403, { error: { code: "turnstile_failed", message: "Verification failed" } }) : anon(n)), { turnstileSiteKey: "site-key", refreshWithoutTurnstile: true });
+    await visit(strict, turnstile);
+    vi.setSystemTime(Date.now() + 58 * 60_000);
+    await visit(strict, turnstile);
+    expect(strict.bodies.map((x) => x.turnstileToken)).toEqual(["ts-token", undefined, "ts-token"]);
+  });
+});
+
+describe("<dewee-chat> reuseHint()", () => {
+  it("hands the host page the tab's hint for its logout route", async () => {
+    defineDeweeChat();
+    const el = document.createElement("dewee-chat") as DeweeChatElement;
+    el.setAttribute("endpoint", "/api/dewee");
+    expect(el.reuseHint()).toBeNull();
+    const b = backend(true, (n) => jsonRes(200, { visitorId: "v_member_01", token: `member${n}`, expiresAt: Date.now() + 3_600_000, expiresIn: 3_600_000, verified: true, reuseHint: `hint${n}` }));
+    await page(b.fetch).ensureSession();
+    expect(el.reuseHint()).toBe("hint1");
   });
 });

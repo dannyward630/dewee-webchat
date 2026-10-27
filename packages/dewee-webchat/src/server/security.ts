@@ -159,8 +159,40 @@ export function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-export async function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
-  let wire: Omit<VisitorClaims, "sub"> = claims;
+/**
+ * Purpose label of a signed-in reuse hint (wire claim `p`). A token with any `p` is never a visitor
+ * bearer token: {@link verifyVisitorToken} refuses it and only {@link verifyReuseHint} accepts it.
+ */
+const REUSE_HINT_PURPOSE = "reuse";
+
+/** Signs a visitor bearer token. */
+export function signVisitorToken(secret: string, claims: VisitorClaims): Promise<string> {
+  return signClaims(secret, claims);
+}
+
+/**
+ * Signs a signed-in reuse hint: the same sealed claims as the visitor token, but only `/session`
+ * accepts it, and only to rebuild the session of the user the host authenticates at that moment.
+ * It is never a credential on its own.
+ */
+export function signReuseHint(secret: string, claims: VisitorClaims): Promise<string> {
+  if (!claims.ids || !claims.ida || !claims.sub) throw new Error("a reuse hint needs a signed-in session with its subject digest");
+  return signClaims(secret, claims, REUSE_HINT_PURPOSE);
+}
+
+/** Verifies a visitor bearer token. A reuse hint (or any token with a purpose label) is refused. */
+export function verifyVisitorToken(secret: string, token: string): Promise<VisitorClaims | null> {
+  return verifyClaims(secret, token);
+}
+
+/** Verifies a reuse hint; a visitor bearer token is refused. Null unless it carries a sealed signed-in session. */
+export async function verifyReuseHint(secret: string, token: string): Promise<VisitorClaims | null> {
+  const claims = await verifyClaims(secret, token, REUSE_HINT_PURPOSE);
+  return claims?.ids && claims.sub ? claims : null;
+}
+
+async function signClaims(secret: string, claims: VisitorClaims, purpose?: string): Promise<string> {
+  let wire: Omit<VisitorClaims, "sub"> & { p?: string } = claims;
   if (claims.ids !== undefined && claims.ida !== undefined) {
     const { sub, ...rest } = claims;
     wire = { ...rest, ids: await sealIdentitySession(secret, claims.v, claims.ida, sub ? { t: claims.ids, h: sub } : { t: claims.ids }) };
@@ -170,18 +202,22 @@ export async function signVisitorToken(secret: string, claims: VisitorClaims): P
     if (typeof claims.ese !== "number" || !Number.isFinite(claims.ese)) throw new Error("edge session expiry is required");
     wire = { ...wire, es: await sealEdgeSession(secret, claims.v, claims.es) };
   }
+  if (purpose) wire = { ...wire, p: purpose };
   const body = b64url(enc.encode(JSON.stringify(wire)));
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(secret), enc.encode(body)));
   return `${body}.${b64url(sig)}`;
 }
 
-export async function verifyVisitorToken(secret: string, token: string): Promise<VisitorClaims | null> {
+async function verifyClaims(secret: string, token: string, purpose?: string): Promise<VisitorClaims | null> {
+  if (typeof token !== "string") return null;
   const [body, sig] = token.split(".");
   if (!body || !sig) return null;
   try {
     const ok = await crypto.subtle.verify("HMAC", await hmacKey(secret), fromB64url(sig), enc.encode(body));
     if (!ok) return null;
-    const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims;
+    const claims = JSON.parse(new TextDecoder().decode(fromB64url(body))) as VisitorClaims & { p?: unknown };
+    // A token is accepted only for the purpose it was signed for: a reuse hint is no bearer token.
+    if (claims.p !== purpose) return null;
     if (typeof claims.v !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(claims.v)) return null;
     if (typeof claims.exp !== "number" || claims.exp < Date.now()) return null;
     // An edge session claim is all or nothing too: the sealed token always travels with its expiry.
@@ -204,6 +240,7 @@ export async function verifyVisitorToken(secret: string, token: string): Promise
         ? { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, sub: opened.h, ...edge }
         : { v: claims.v, exp: claims.exp, ids: opened.t, ida: claims.ida, ...edge };
     }
+    if (purpose !== undefined) return { v: claims.v, exp: claims.exp, ...edge };
     return claims.es !== undefined ? { v: claims.v, exp: claims.exp, ...edge } : claims;
   } catch {
     return null;
