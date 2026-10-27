@@ -7,9 +7,10 @@
 // shown, quotas, and every authorization of the visitor. Nothing CCP says is passed to a browser
 // verbatim: events and errors are rebuilt from known fields with this module's own messages.
 import { stripPageBlock } from "../actions/page-block";
-import { isIdentityErrorCode, type AgentInfo, type ChatStreamEvent, type HistoryMessage, type IdentityErrorCode, type LinkResponse, type Remediation, type ToolCallView } from "../protocol";
+import { isAdmissionErrorCode, isIdentityErrorCode, type AdmissionErrorCode, type AgentInfo, type ChatStreamEvent, type HistoryMessage, type IdentityErrorCode, type LinkResponse, type Remediation, type ToolCallView } from "../protocol";
 import { CcpClient, CcpError, knownRemediation, readSseJson, type CcpRequest, type CcpRoute } from "./ccp-client";
 import { DEAD_SESSION_CODES, IDENTITY_ERRORS } from "./identity-errors";
+import { admissionErrorEvent } from "./admission-errors";
 import type { DeweeIdentitySdk, IdentitySigner } from "./handler";
 
 // Upstream JSON is read as `any` only inside the parsers of this module; every field is type-checked
@@ -71,6 +72,12 @@ export interface BrowserError {
   identity?: IdentityErrorCode;
   remediation?: Remediation;
   retryAfterSeconds?: number;
+  /**
+   * Set when a message was refused for admission (`chat` only): the handler answers it typed, as the
+   * legacy gateway's `POLICY_DENIED` / `RATE_LIMITED`, with `retryAfterMs` (raw; normalized there).
+   */
+  admission?: AdmissionErrorCode;
+  retryAfterMs?: number;
 }
 
 const GENERIC_UNAVAILABLE: BrowserError = { status: 502, code: "gateway_error", message: "Dewee is unavailable, try again later" };
@@ -87,6 +94,13 @@ export function browserErrorFor(e: unknown, route: CcpRoute): BrowserError {
   }
   const log = (level: "warn" | "error", hint: string) => console[level](`[dewee-webchat] ccp ${route}: ${e.code} (HTTP ${e.status}) ${hint}`);
   if (isIdentityErrorCode(e.code)) return { status: IDENTITY_ERRORS[e.code].status, code: e.code, message: IDENTITY_ERRORS[e.code].message, identity: e.code, remediation: e.remediation };
+  const retryAfterMs = e.retryAfterSeconds ? e.retryAfterSeconds * 1000 : undefined;
+  // A refused message is an admission error, the same typed refusal the legacy gateway gives, so the
+  // widget shows its cooldown or the refusal note. Other routes keep their own codes.
+  if (route === "chat") {
+    if (isAdmissionErrorCode(e.code)) return { status: e.code === "RATE_LIMITED" ? 429 : 403, code: e.code, message: "", admission: e.code, retryAfterMs };
+    if (e.code === "rate_limited" || e.code === "concurrency_limited" || e.status === 429) return { status: 429, code: "RATE_LIMITED", message: "", admission: "RATE_LIMITED", retryAfterMs };
+  }
   switch (e.code) {
     case "invalid_request":
       log("error", "- the ingress refused the request shape; check the dewee-webchat version");
@@ -133,13 +147,15 @@ export function browserErrorFor(e: unknown, route: CcpRoute): BrowserError {
 }
 
 /** The SSE `error` event for a code a run ended with. Messages are this module's own. */
-function streamError(code: unknown, remediation: unknown): ChatStreamEvent {
+function streamError(code: unknown, remediation: unknown, retryAfterMs?: unknown): ChatStreamEvent {
   if (isIdentityErrorCode(code)) {
     const valid: Remediation | undefined = knownRemediation(remediation);
     return { type: "error", code, message: IDENTITY_ERRORS[code].message, ...(valid ? { remediation: valid } : {}) };
   }
   if (code === "cancelled") return { type: "error", code: "cancelled", message: "Cancelled" };
-  if (code === "rate_limited" || code === "concurrency_limited") return { type: "error", code: "rate_limited", message: "Too many messages, please wait a moment" };
+  // Rate and quota refusals during a run are the typed admission refusal, with the widget's cooldown.
+  if (code === "rate_limited" || code === "concurrency_limited") return admissionErrorEvent("RATE_LIMITED", retryAfterMs);
+  if (isAdmissionErrorCode(code)) return admissionErrorEvent(code, retryAfterMs);
   if (code === "run_failed") return { type: "error", code: "run_failed", message: "The agent could not answer, please try again" };
   return { type: "error", code: "gateway_error", message: "Dewee is unavailable, try again later" };
 }
@@ -353,7 +369,7 @@ export function createCcpTransport(client: CcpClient, identity?: CcpIdentityDeps
             return;
           }
           case "error":
-            yield streamError(f.code, f.remediation);
+            yield streamError(f.code, f.remediation, f.retryAfterMs ?? (typeof f.retry_after_seconds === "number" ? f.retry_after_seconds * 1000 : undefined));
             return;
           default:
             break; // unknown frames are dropped

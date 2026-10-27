@@ -197,6 +197,10 @@ export async function startFakeCcp(): Promise<FakeCcp> {
         frame({ type: "error", code: "run_failed", message: "provider exploded at https://runtime.internal:8443 tenant=0193" });
         return res.end();
       }
+      if (message.endsWith("midlimit")) {
+        frame({ type: "error", code: "rate_limited", message: "bucket wid=0193 exceeded at https://runtime.internal:8443" });
+        return res.end();
+      }
       if (message.endsWith("midrevoke")) {
         frame({ type: "error", code: "LINK_REVOKED", message: "revoked", remediation: { action: "reauthenticate", audience: "end_user" } });
         return res.end();

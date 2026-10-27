@@ -431,6 +431,10 @@ export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
   /** A CCP refusal or failure, as the browser contract answers it. Never carries CCP's own text. */
   function ccpFail(req: Request, e: unknown, route: Parameters<typeof browserErrorFor>[1], sessionToken?: string): Response {
     const b: BrowserError = browserErrorFor(e, route);
+    if (b.admission) {
+      const r = admissionErrorResponse(b.admission, b.retryAfterMs);
+      return json(req, r.body, r.status, r.headers);
+    }
     if (b.identity) {
       if (sessionToken && DEAD_SESSION_CODES.has(b.identity)) forgetCachedSession(sessionToken);
       return identityFail(req, b.identity, b.remediation);

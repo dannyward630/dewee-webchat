@@ -272,8 +272,8 @@ describe("ccp transport: refusals and failures", () => {
     [403, "origin_not_allowed", 403, "forbidden_origin"],
     [409, "run_in_progress", 409, "run_in_progress"],
     [413, "message_too_large", 413, "too_long"],
-    [429, "rate_limited", 429, "rate_limited"],
-    [429, "concurrency_limited", 429, "rate_limited"],
+    [429, "rate_limited", 429, "RATE_LIMITED"],
+    [429, "concurrency_limited", 429, "RATE_LIMITED"],
     [400, "invalid_request", 400, "bad_request"],
     [502, "upstream_failed", 502, "gateway_error"],
     [503, "ingress_unavailable", 502, "gateway_error"],
@@ -286,7 +286,38 @@ describe("ccp transport: refusals and failures", () => {
     expect(r.status).toBe(browserStatus);
     expect(r.json().error.code).toBe(browserCode);
     expect(r.text).not.toMatch(/postgres|tenant|runtime|internal/);
-    if (status === 429) expect(r.headers.get("retry-after")).toBe("30");
+    if (status === 429) {
+      expect(r.headers.get("retry-after")).toBe("30");
+      expect(r.json()).toEqual({ error: { message: "Too many messages, please wait a moment.", code: "RATE_LIMITED", retryAfterMs: 30_000 } });
+    }
+  });
+
+  it("answers a refused message as the typed admission refusal the widget understands, with fixed text", async () => {
+    const h = makeHandler();
+    const s = await session(h);
+    // No Retry-After from CCP: the widget still gets a bounded cooldown.
+    ccp.state.failNext.set("chat", { status: 429, code: "rate_limited", message: "bucket wid=0193 at https://runtime.internal" });
+    const limited = await quiet(() => chat(h, s.token));
+    expect(limited.status).toBe(429);
+    expect(limited.json()).toEqual({ error: { message: "Too many messages, please wait a moment.", code: "RATE_LIMITED", retryAfterMs: 5000 } });
+    expect(limited.headers.get("retry-after")).toBe("5");
+    // A policy refusal, should CCP send one, is typed and carries no CCP text.
+    ccp.state.failNext.set("chat", { status: 403, code: "POLICY_DENIED", message: "blocked by rule 0193" });
+    const denied = await quiet(() => chat(h, s.token));
+    expect(denied.status).toBe(403);
+    expect(denied.json()).toEqual({ error: { message: "This message can't be sent.", code: "POLICY_DENIED" } });
+    // A rate refusal at /session is not a message refusal and keeps its own code.
+    ccp.state.failNext.set("session", { status: 429, code: "rate_limited", retryAfter: 9 });
+    const opened = await quiet(() => h(new Request(`${BASE}/session`, { method: "POST", body: "{}" })));
+    expect([opened.status, opened.json().error.code, opened.headers.get("retry-after")]).toEqual([429, "rate_limited", "9"]);
+  });
+
+  it("ends a run CCP rate-limits mid-stream with the typed admission event", async () => {
+    const h = makeHandler();
+    const s = await session(h);
+    const r = await chat(h, s.token, { message: "please midlimit" });
+    expect(sse(r.text).at(-1)).toEqual({ type: "error", code: "RATE_LIMITED", message: "Too many messages, please wait a moment.", retryAfterMs: 5000 });
+    expect(r.text).not.toMatch(/wid=|runtime\.internal/);
   });
 
   it("refuses an agent outside the integration's set (CCP decides) and a malformed one locally", async () => {
