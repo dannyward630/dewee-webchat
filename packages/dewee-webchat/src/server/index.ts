@@ -34,8 +34,11 @@ export {
   type VisitorClaims,
 } from "./security";
 export { ACTION_LIMITS, buildPageBlock, hashManifest, normalizeManifest, stripPageBlock } from "../actions/page-block";
+export { ADMISSION_ERROR_CODES, isAdmissionErrorCode } from "../protocol";
+export { DEFAULT_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS, admissionErrorEvent } from "./admission-errors";
 export type {
   ActionManifestEntry,
+  AdmissionErrorCode,
   ActionSensitivity,
   AgentInfo,
   ChatRequestBody,

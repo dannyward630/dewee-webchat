@@ -45,9 +45,17 @@ export interface ApiClientOptions {
 }
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number, public code?: string, public remediation?: Remediation) {
+  /** `retryAfterMs`: how long to wait before sending again (`RATE_LIMITED`). */
+  constructor(message: string, public status: number, public code?: string, public remediation?: Remediation, public retryAfterMs?: number) {
     super(message);
   }
+}
+
+/** Cooldown of a refused request: the body's `retryAfterMs`, else the `Retry-After` header (seconds). */
+function retryAfterOf(bodyMs: unknown, res: Response): number | undefined {
+  if (typeof bodyMs === "number" && Number.isFinite(bodyMs) && bodyMs > 0) return bodyMs;
+  const header = Number(res.headers.get("retry-after"));
+  return Number.isFinite(header) && header > 0 ? header * 1000 : undefined;
 }
 
 const storage = (pick: () => Storage) => ({
@@ -123,7 +131,7 @@ export class ApiClient {
     if (!res.ok) {
       const r = body?.error?.remediation;
       const remediation = r && typeof r.action === "string" && typeof r.audience === "string" ? { action: r.action, audience: r.audience } : undefined;
-      throw new ApiError(body?.error?.message || `HTTP ${res.status}`, res.status, body?.error?.code, remediation);
+      throw new ApiError(body?.error?.message || `HTTP ${res.status}`, res.status, body?.error?.code, remediation, retryAfterOf(body?.error?.retryAfterMs, res));
     }
     return body as T;
   }

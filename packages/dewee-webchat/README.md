@@ -425,6 +425,11 @@ the Node/Workers handler. It refuses tokens that carry an identity session.
 - Only allowed agents are reachable (the integration's, legacy: `agents`); origin allowlist, rate limits (20 messages/min per visitor, 10
   new sessions/10 min per IP by default — pass `rateLimit` for a shared store), 4000-char messages,
   optional Turnstile.
+- The Dewee gateway enforces the shared admission limits on every message. A refusal reaches the widget
+  as a typed SSE error (`POLICY_DENIED`, or `RATE_LIMITED` with `retryAfterMs`) with a fixed message, never
+  the gateway's own text. The widget shows a localized error and disables sending until `retryAfterMs`
+  has passed, announced to screen readers. The backend's in-memory limiter is defense in depth; the
+  gateway owns the shared limit. See [admission errors](../../docs/http-contract.md#admission-errors).
 - The client IP for per-IP limits comes from `cf-connecting-ip`, `x-real-ip` or the first
   `x-forwarded-for` entry. These headers are only trustworthy behind a proxy that overwrites them
   (as before signed-in users existed); elsewhere a client can choose its own IP, both for this

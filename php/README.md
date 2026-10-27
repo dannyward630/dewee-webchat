@@ -72,7 +72,9 @@ Array options use the TS names (`transport`, `ccp` = `['chatUrl' => …, 'integr
 'integrationSecret' => …]`, `gatewayUrl`, `token`, `agents`, `allowedOrigins`, `rateLimit` =
 `false` or `callable(string $key, string $bucket): bool`, `onChat`, `timeoutMs`, …). Rate limits
 default to 20 messages/min per visitor+IP and 10 sessions/10 min per IP, kept in files under
-`sys_get_temp_dir()`. Without a secret, a generated one is stored in the temp dir (set your own).
+`sys_get_temp_dir()`. They are defense in depth: the Dewee gateway owns the shared message limit, and its
+`POLICY_DENIED` / `RATE_LIMITED` refusals are streamed as typed errors exactly like the TypeScript handler
+([admission errors](../docs/http-contract.md#admission-errors)). Without a secret, a generated one is stored in the temp dir (set your own).
 
 ## Streaming (SSE) behind a web server
 
