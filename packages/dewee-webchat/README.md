@@ -428,7 +428,8 @@ the Node/Workers handler. It refuses tokens that carry an identity session.
 - The Dewee gateway enforces the shared admission limits on every message. A refusal reaches the widget
   as a typed SSE error (`POLICY_DENIED`, or `RATE_LIMITED` with `retryAfterMs`) with a fixed message, never
   the gateway's own text. The widget shows a localized error and disables sending until `retryAfterMs`
-  has passed, announced to screen readers. The backend's in-memory limiter is defense in depth; the
+  has passed, announced to screen readers. With `ccp`, CCP's refusals of a message reach the widget the
+  same way. The backend's in-memory limiter is defense in depth; the
   gateway owns the shared limit. See [admission errors](../../docs/http-contract.md#admission-errors).
 - The client IP for per-IP limits comes from `cf-connecting-ip`, `x-real-ip` or the first
   `x-forwarded-for` entry. These headers are only trustworthy behind a proxy that overwrites them

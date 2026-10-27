@@ -71,7 +71,8 @@ The handler refuses to start (Node) or answers `500 not_configured` and logs why
   `showReasoning` / `showToolCalls` say. Tool calls show names only.
 - **Errors** keep the browser contract's codes. A wrong, rotated-out or revoked integration secret is
   `500 not_configured` (the reason is in your server log), a disabled integration `503 unavailable`,
-  CCP's quotas `429 rate_limited` with `Retry-After`. CCP's messages are never forwarded.
+  a refused message `429 RATE_LIMITED` with `retryAfterMs` (or `POLICY_DENIED`), the same admission
+  errors as the legacy gateway, so the widget shows its cooldown. CCP's messages are never forwarded.
 - **History.** Conversations are stored per integration visitor at CCP. Conversations made through
   the legacy gateway do not appear after the switch; visitors keep their visitor id, but start a new
   history.

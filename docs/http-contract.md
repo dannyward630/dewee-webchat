@@ -86,6 +86,13 @@ most 600000. When the gateway refuses before streaming starts (a signed-in user'
 codes are JSON errors: `403 POLICY_DENIED`, `429 RATE_LIMITED` with `error.retryAfterMs` and a
 `Retry-After` header in seconds, `403 CHALLENGE_REQUIRED`.
 
+> **Transport `ccp`.** CCP's refusals of a message are these same admission errors, with the same fixed
+> messages. A `/chat` that CCP answers `429` (`rate_limited` or `concurrency_limited`) is
+> `429 RATE_LIMITED` with `retryAfterMs` from CCP's `Retry-After` (5000 when absent), a run CCP
+> rate-limits mid-stream ends with the `RATE_LIMITED` event, and a `POLICY_DENIED` from CCP is passed on
+> typed. CCP's `403` reasons (disabled integration, agent or origin not allowed) are not message policy and
+> keep their own codes; a rate refusal at `/session` stays `429 rate_limited`.
+
 The gateway owns the shared message limit across every backend replica. The backend's own limiter (in
 memory by default, 20 messages per minute) is defense in depth: it answers `429 rate_limited` without
 `retryAfterMs` before the gateway is reached.
