@@ -45,7 +45,7 @@ import {
 import { DEAD_SESSION_CODES, IDENTITY_ERRORS } from "./identity-errors";
 import { CcpClient, CcpError, parseCcpOptions, type CcpOptions } from "./ccp-client";
 import { resolveTransport } from "./transport-selection";
-import { CCP_ID_RE, browserErrorFor, createCcpTransport, type BrowserError, type CcpConfig, type EdgeSession, type VisitorContext } from "./ccp-transport";
+import { CCP_ID_RE, EDGE_RESEAL_MS, browserErrorFor, createCcpTransport, type BrowserError, type CcpConfig, type EdgeSession, type VisitorContext } from "./ccp-transport";
 
 /**
  * A signed-in user of the host app, as `identity.authenticate` reports it. Scopes are not part of
@@ -232,6 +232,11 @@ const MAX_IDENTITY_TTL_MS = 43_200_000;
 const MAX_CACHED_SESSIONS = 1000;
 /** An anonymous token this far from expiry is handed back as is instead of minting a new one. */
 const ANON_REUSE_MS = 86_400_000;
+/**
+ * CCP: a signed-in token the widget sends back to `/session` (`verifiedToken`) is reused for its
+ * identity session only with at least this long left, so a refresh near the end exchanges instead.
+ */
+const VERIFIED_REUSE_MIN_MS = 120_000;
 
 /** Validates the identity options once, at startup, and returns the agent sessions are bound to. */
 function checkIdentityOptions(o: DeweeHandlerOptions, staticAgents: AgentInfo[], transport: DeweeTransport): string {
@@ -321,6 +326,17 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
 
   const sealedEdge = (claims: VisitorClaims | null | undefined): EdgeSession | undefined =>
     claims?.es && typeof claims.ese === "number" ? { token: claims.es, expiresAt: claims.ese } : undefined;
+
+  /**
+   * CCP: the session answer the widget refreshes from. The token itself lives `exp`; the widget is
+   * told the edge session's end instead (`expiresAt`, `expiresIn`), so it asks `/session` again while
+   * the sealed edge session can still be refreshed and a host without shared memory (serverless
+   * isolates, PHP-style restarts) never has to refresh or create one on every request.
+   */
+  const ccpSessionTimes = (exp: number, edge: EdgeSession, now = Date.now()) => {
+    const expiresAt = Math.min(exp, edge.expiresAt);
+    return { expiresAt, expiresIn: Math.max(0, expiresAt - now) };
+  };
 
   function serverCreds(): GatewayCredentials | null {
     return o.gatewayUrl && o.token ? { url: o.gatewayUrl, token: o.token, tenantId: o.tenantId } : null;
@@ -561,8 +577,8 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     }
   }
 
-  async function exchangeFor(subject: string, req: Request): Promise<CachedSession> {
-    if (ccp) return ccpExchangeFor(subject, req);
+  async function exchangeFor(subject: string, req: Request, sealed?: EdgeSession): Promise<CachedSession> {
+    if (ccp) return ccpExchangeFor(subject, req, sealed);
     const session = await idn!.sdk.exchangeSession({
       gatewayUrl: o.gatewayUrl!,
       allowInsecureHttp: idn!.allowInsecureHttp,
@@ -600,9 +616,9 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
    * host's subject (keyed, not guessable), so the edge session the exchange needs exists before the
    * principal is known; the runtime keys conversations by the verified principal either way.
    */
-  async function ccpExchangeFor(subject: string, req: Request): Promise<CachedSession> {
+  async function ccpExchangeFor(subject: string, req: Request, sealed?: EdgeSession): Promise<CachedSession> {
     const visitorId = await deriveVisitorId(secret!, `subject:${subject}`);
-    const session = await ccp!.exchange(visitorContext(req), visitorId, subject, await boundAgent());
+    const session = await ccp!.exchange(visitorContext(req), visitorId, subject, await boundAgent(), sealed);
     const receivedAt = Date.now();
     const lifetime = identityLifetime(session.expiresAt, receivedAt);
     return { sessionToken: session.sessionToken, visitorId, deadline: receivedAt + lifetime, margin: Math.min(60_000, lifetime / 2) };
@@ -614,8 +630,26 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     return (await ccp.config()).defaultAgent;
   }
 
-  /** A signed-in user's identity session, reused or exchanged, wrapped in a visitor token. */
-  async function issueIdentitySession(req: Request, subject: string): Promise<Response> {
+  /**
+   * CCP: the identity session of a signed-in token the widget sent back, when it was issued by this
+   * backend for this same user and agent and still has {@link VERIFIED_REUSE_MIN_MS} left. A host that
+   * keeps no memory between requests then reuses it instead of exchanging on every page load. It is
+   * never stretched: the deadline stays the token's own expiry. Anything else is ignored, never a
+   * reason to answer anonymously.
+   */
+  async function verifiedReuse(hint: VisitorClaims | null, subject: string, agent: string, userVisitor: string | undefined): Promise<CachedSession | null> {
+    if (!ccp || !hint?.ids || hint.ida !== agent || !hint.sub || hint.v !== userVisitor) return null;
+    if (hint.exp - Date.now() <= VERIFIED_REUSE_MIN_MS) return null;
+    if (!constantTimeEqual(await subjectDigest(secret!, subject), hint.sub)) return null;
+    return { sessionToken: hint.ids, visitorId: hint.v, deadline: hint.exp, margin: Math.min(60_000, VERIFIED_REUSE_MIN_MS / 2) };
+  }
+
+  /**
+   * A signed-in user's identity session, reused or exchanged, wrapped in a visitor token. `hint` is a
+   * verified token the widget sent back (CCP only): its identity session and edge session are reused
+   * when they belong to this user.
+   */
+  async function issueIdentitySession(req: Request, subject: string, hint: VisitorClaims | null = null): Promise<Response> {
     let agent: string;
     try {
       agent = await boundAgent();
@@ -624,16 +658,24 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     }
     const key = `${agent}\n${subject}`;
     let s = sessionCache.get(key);
+    const userVisitor = ccp ? await deriveVisitorId(secret!, `subject:${subject}`) : undefined;
+    // The edge session of an earlier token of this user is refreshed rather than replaced.
+    const sealed = hint && hint.ids && hint.v === userVisitor ? sealedEdge(hint) : undefined;
     if (!s || s.deadline - Date.now() <= s.margin) {
-      let pending = exchanges.get(key);
-      if (!pending) {
-        pending = exchangeFor(subject, req).finally(() => exchanges.delete(key));
-        exchanges.set(key, pending);
-      }
-      try {
-        s = await pending;
-      } catch (e) {
-        return ccp ? ccpExchangeFail(req, e) : exchangeFail(req, e);
+      const reused = await verifiedReuse(hint, subject, agent, userVisitor);
+      if (reused) {
+        s = reused;
+      } else {
+        let pending = exchanges.get(key);
+        if (!pending) {
+          pending = exchangeFor(subject, req, sealed).finally(() => exchanges.delete(key));
+          exchanges.set(key, pending);
+        }
+        try {
+          s = await pending;
+        } catch (e) {
+          return ccp ? ccpExchangeFail(req, e) : exchangeFail(req, e);
+        }
       }
       rememberSession(key, s);
     }
@@ -643,13 +685,14 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     let edge: EdgeSession | undefined;
     if (ccp) {
       try {
-        edge = await ccp.edgeFor(visitorContext(req), s.visitorId);
+        edge = await ccp.edgeFor(visitorContext(req), s.visitorId, sealed, undefined, EDGE_RESEAL_MS);
       } catch (e) {
         return ccpFail(req, e, "session");
       }
     }
     const token = await signVisitorToken(secret!, { v: s.visitorId, exp: expiresAt, ids: s.sessionToken, ida: agent, sub, ...(edge ? { es: edge.token, ese: edge.expiresAt } : {}) });
-    const body: SessionResponse = { visitorId: s.visitorId, token, expiresAt, verified: true, expiresIn: expiresAt - now };
+    const times = edge ? ccpSessionTimes(expiresAt, edge) : { expiresAt, expiresIn: expiresAt - now };
+    const body: SessionResponse = { visitorId: s.visitorId, token, expiresAt: times.expiresAt, verified: true, expiresIn: times.expiresIn };
     return json(req, body);
   }
 
@@ -728,29 +771,44 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
   async function handleSession(req: Request): Promise<Response> {
     if (idn) return handleIdentitySession(req);
     const ip = clientIp(req);
+    if (ccp) {
+      // A returning visitor refreshes its own session: limited per visitor, so visitors behind one
+      // address (an office, a carrier NAT) do not use up each other's budget. New visitors are per IP.
+      const body: any = await req.json().catch(() => ({}));
+      const previous = await anonymousPrevious(body);
+      if (limiter && !(await limiter(previous ? `visitor:${previous.v}` : ip, "session"))) return fail(req, 429, "Too many sessions, slow down", "rate_limited");
+      return issueAnonymousSession(req, body, ip, previous);
+    }
     if (limiter && !(await limiter(ip, "session"))) return fail(req, 429, "Too many sessions, slow down", "rate_limited");
     const body: any = await req.json().catch(() => ({}));
     return issueAnonymousSession(req, body, ip);
   }
 
-  async function issueAnonymousSession(req: Request, body: any, ip: string): Promise<Response> {
+  /** The still-valid anonymous token a `/session` body brings. A signed-in user's token never seeds an anonymous visitor. */
+  async function anonymousPrevious(body: any): Promise<VisitorClaims | null> {
+    const previous = typeof body?.token === "string" ? await verifyVisitorToken(secret!, body.token) : null;
+    return previous && !previous.ids ? previous : null;
+  }
+
+  async function issueAnonymousSession(req: Request, body: any, ip: string, known?: VisitorClaims | null): Promise<Response> {
     if (!(await turnstilePassed(body, ip))) return fail(req, 403, "Verification failed", "turnstile_failed");
     // Refresh an existing visitor instead of minting a new identity, so history survives.
-    // A signed-in user's token never seeds an anonymous visitor.
-    const previous = typeof body?.token === "string" ? await verifyVisitorToken(secret!, body.token) : null;
-    const visitorId = (previous && !previous.ids ? previous.v : undefined) ?? randomId(16);
+    const previous = known === undefined ? await anonymousPrevious(body) : known;
+    const visitorId = previous?.v ?? randomId(16);
     const expiresAt = Date.now() + o.sessionTtlMs;
-    let edge: EdgeSession | undefined;
-    if (ccp) {
-      // CCP admits the visitor (its own quotas) before a token is issued.
-      try {
-        edge = await ccp.edgeFor(visitorContext(req), visitorId, previous && !previous.ids ? sealedEdge(previous) : undefined);
-      } catch (e) {
-        return ccpFail(req, e, "session");
-      }
+    if (!ccp) return json(req, { visitorId, token: await signVisitorToken(secret!, { v: visitorId, exp: expiresAt }), expiresAt });
+    // CCP admits the visitor (its own quotas) before a token is issued. A stale sealed edge session
+    // (a host without shared memory never saw it refreshed) is refreshed for the same visitor here, so
+    // the token handed back carries a fresh one.
+    let edge: EdgeSession;
+    try {
+      edge = await ccp.edgeFor(visitorContext(req), visitorId, sealedEdge(previous), undefined, EDGE_RESEAL_MS);
+    } catch (e) {
+      return ccpFail(req, e, "session");
     }
-    const claims: VisitorClaims = edge ? { v: visitorId, exp: expiresAt, es: edge.token, ese: edge.expiresAt } : { v: visitorId, exp: expiresAt };
-    return json(req, { visitorId, token: await signVisitorToken(secret!, claims), expiresAt });
+    const token = await signVisitorToken(secret!, { v: visitorId, exp: expiresAt, es: edge.token, ese: edge.expiresAt });
+    const body2: SessionResponse = { visitorId, token, ...ccpSessionTimes(expiresAt, edge) };
+    return json(req, body2);
   }
 
   /**
@@ -780,16 +838,28 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       }
       if (limiter && !(await limiter(`subject:${user.subject}`, "verified"))) return fail(req, 429, "Too many sessions, slow down", "rate_limited");
       if (!(await turnstilePassed(body, ip))) return fail(req, 403, "Verification failed", "turnstile_failed");
-      return issueIdentitySession(req, user.subject);
+      // CCP: the widget's previous signed-in token, a reuse hint checked against this user.
+      const hint = ccp && typeof body?.verifiedToken === "string" ? await verifyVisitorToken(secret!, body.verifiedToken) : null;
+      return issueIdentitySession(req, user.subject, hint);
     }
     if (idn!.required) return identityFail(req, "IDENTITY_REQUIRED");
-    const previous = typeof body?.token === "string" ? await verifyVisitorToken(secret!, body.token) : null;
-    if (previous && !previous.ids && previous.exp - Date.now() > ANON_REUSE_MS) {
-      const reused: SessionResponse = { visitorId: previous.v, token: body.token, expiresAt: previous.exp };
-      return json(req, reused);
+    const previous = await anonymousPrevious(body);
+    if (previous && previous.exp - Date.now() > ANON_REUSE_MS) {
+      if (!ccp) {
+        const reused: SessionResponse = { visitorId: previous.v, token: body.token, expiresAt: previous.exp };
+        return json(req, reused);
+      }
+      // CCP: handed back as is only while its sealed edge session is fresh; else re-sealed below.
+      const edge = sealedEdge(previous);
+      if (edge && edge.expiresAt - Date.now() > EDGE_RESEAL_MS) {
+        const reused: SessionResponse = { visitorId: previous.v, token: body.token, ...ccpSessionTimes(previous.exp, edge) };
+        return json(req, reused);
+      }
     }
-    if (limiter && !(await limiter(ip, "session"))) return fail(req, 429, "Too many sessions, slow down", "rate_limited");
-    return issueAnonymousSession(req, body, ip);
+    // CCP: a returning visitor is limited per visitor (see handleSession); new visitors per IP.
+    const key = ccp && previous ? `visitor:${previous.v}` : ip;
+    if (limiter && !(await limiter(key, "session"))) return fail(req, 429, "Too many sessions, slow down", "rate_limited");
+    return issueAnonymousSession(req, body, ip, previous);
   }
 
   async function handleChat(req: Request): Promise<Response> {

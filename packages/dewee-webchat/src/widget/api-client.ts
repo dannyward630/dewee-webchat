@@ -50,11 +50,19 @@ export class ApiError extends Error {
   }
 }
 
-const store = {
-  get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },
-  set(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } },
-  del(k: string) { try { localStorage.removeItem(k); } catch { /* storage blocked */ } },
-};
+const storage = (pick: () => Storage) => ({
+  get(k: string): string | null { try { return pick().getItem(k); } catch { return null; } },
+  set(k: string, v: string) { try { pick().setItem(k, v); } catch { /* storage blocked */ } },
+  del(k: string) { try { pick().removeItem(k); } catch { /* storage blocked */ } },
+});
+/** The anonymous visitor session, kept across visits. */
+const store = storage(() => localStorage);
+/**
+ * The last signed-in token of this tab, kept only as a reuse hint for `/session` (`verifiedToken`):
+ * the backend checks it against the user it authenticates and never answers from it alone, so a
+ * sign-out or another user never inherits it. Requests always use the session `/session` returned.
+ */
+const tabStore = storage(() => sessionStorage);
 
 export class ApiClient {
   private session: HeldSession | null = null;
@@ -71,6 +79,10 @@ export class ApiClient {
 
   private get storageKey(): string {
     return `dewee-webchat:session:${this.o.endpoint}`;
+  }
+
+  private get verifiedKey(): string {
+    return `dewee-webchat:verified:${this.o.endpoint}`;
   }
 
   private request(url: string, init: RequestInit): Promise<Response> {
@@ -119,13 +131,16 @@ export class ApiClient {
   /**
    * Session reuse. A signed-in session follows its schedule (see `scheduleRefresh`). An anonymous
    * token is refreshed once less than 10% of its lifetime (at most 24 h, at least 30 s) remains; a
-   * stored token from before `obtainedAt` existed uses the 24 h margin.
+   * stored token from before `obtainedAt` existed uses the 24 h margin. When the backend reports the
+   * lifetime (`expiresIn`), it is counted from receipt, so a skewed browser clock does not matter.
    */
   private fresh(s: HeldSession): boolean {
     if (s.verified) return Date.now() < (this.refreshAt.get(s) ?? 0);
-    const lifetime = s.obtainedAt ? s.expiresAt - s.obtainedAt : Infinity;
+    const reported = typeof s.expiresIn === "number" && s.expiresIn >= 0 && s.obtainedAt;
+    const end = reported ? s.obtainedAt! + s.expiresIn! : s.expiresAt;
+    const lifetime = reported ? s.expiresIn! : s.obtainedAt ? s.expiresAt - s.obtainedAt : Infinity;
     const margin = Math.min(86_400_000, Math.max(30_000, lifetime * 0.1));
-    return s.expiresAt - Date.now() > margin;
+    return end - Date.now() > margin;
   }
 
   /**
@@ -174,27 +189,45 @@ export class ApiClient {
     const body: Record<string, string> = {};
     const previous = this.session && !this.session.verified ? this.session : this.stored();
     if (previous?.token) body.token = previous.token;
+    if (cfg.identity) {
+      const verified = this.session?.verified ? this.session.token : tabStore.get(this.verifiedKey);
+      if (verified) body.verifiedToken = verified;
+    }
     if (cfg.turnstileSiteKey) {
       if (!this.o.turnstile) throw new ApiError("Verification is required but no Turnstile handler is set", 403, "turnstile_required");
       body.turnstileToken = await this.o.turnstile(cfg.turnstileSiteKey);
     }
-    const s = await this.parse<SessionResponse>(
-      await this.request(this.url("session"), { method: "POST", headers: await this.headers(), body: JSON.stringify(body) }),
-    );
+    let s: SessionResponse;
+    try {
+      s = await this.parse<SessionResponse>(
+        await this.request(this.url("session"), { method: "POST", headers: await this.headers(), body: JSON.stringify(body) }),
+      );
+    } catch (e) {
+      // Nobody is signed in (or sign-in is required): the hint has no user left to serve.
+      if (e instanceof ApiError && e.status === 401) tabStore.del(this.verifiedKey);
+      throw e;
+    }
     // obtainedAt lets fresh() size the refresh margin to the server's token lifetime.
     const now = Date.now();
     const held: HeldSession = { ...s, obtainedAt: now };
     this.session = held;
-    // A signed-in session stays in memory only: the next page load asks the backend again, so a
-    // sign-out or a different user never inherits it.
-    if (held.verified) this.scheduleRefresh(held, now);
-    else store.set(this.storageKey, JSON.stringify(held));
+    // A signed-in session is used from memory only: the next page load asks the backend again, so a
+    // sign-out or a different user never inherits it. Its token stays in the tab as a reuse hint.
+    if (held.verified) {
+      this.scheduleRefresh(held, now);
+      tabStore.set(this.verifiedKey, held.token);
+    } else {
+      tabStore.del(this.verifiedKey);
+      store.set(this.storageKey, JSON.stringify(held));
+    }
     return held;
   }
 
   /** Drops the session; the next request creates a new one. A stored anonymous visitor is kept for a signed-in session. */
   forgetSession(): void {
     if (this.session?.verified) {
+      // Refused by the backend: never offered again as a reuse hint.
+      tabStore.del(this.verifiedKey);
       this.session = null;
       return;
     }

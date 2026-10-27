@@ -62,13 +62,21 @@ export interface PublicConfig {
 export interface SessionResponse {
   visitorId: string;
   token: string;
+  /**
+   * When the widget should come back to `/session` (refreshing with `token`). With the ccp transport
+   * this is when the CCP edge session sealed in the token ends, earlier than the token itself.
+   */
   expiresAt: number;
-  /** Present (true) when the session carries a verified Dewee identity. Such sessions are short-lived and never persisted. */
+  /**
+   * Present (true) when the session carries a verified Dewee identity. Such sessions are short-lived and
+   * are used from memory only; the tab keeps the last token as a reuse hint for `/session`, which the
+   * backend checks against the user it authenticates.
+   */
   verified?: boolean;
   /**
-   * Verified sessions only: milliseconds the session stays valid, counted from when the response is
-   * received. The widget refreshes from this rather than `expiresAt`, so a skewed browser clock does not
-   * matter.
+   * Verified sessions, and every session of the ccp transport: milliseconds until `expiresAt`, counted
+   * from when the response is received. The widget refreshes from this rather than `expiresAt`, so a
+   * skewed browser clock does not matter.
    */
   expiresIn?: number;
 }
