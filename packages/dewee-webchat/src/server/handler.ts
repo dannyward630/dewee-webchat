@@ -218,7 +218,18 @@ export interface DeweeHandlerOptions {
   identity?: DeweeIdentityOptions;
 }
 
-type Handler = (request: Request) => Promise<Response>;
+/** The backend: one function for every route, plus the logout hook of signed-in users. */
+export interface DeweeHandler {
+  (request: Request): Promise<Response>;
+  /**
+   * Call from your logout: ends the Dewee identity sessions this backend holds for `subject` (every
+   * bound agent) and forgets them, so the next `/session` exchanges again. With `transport: "ccp"` they
+   * are revoked at CCP (`identity/revoke`); pass the logout request so CCP sees the visitor's origin
+   * and IP. Best effort: never throws. Sessions held only by other instances of a host that does not
+   * share memory end at their expiry (`sessionTtlSeconds`). Without `identity` it does nothing.
+   */
+  revoke(subject: string, request?: Request): Promise<void>;
+}
 
 const ID_RE = /^[A-Za-z0-9_-]{6,64}$/;
 const AGENT_RE = /^[A-Za-z0-9_.:-]{1,64}$/;
@@ -275,7 +286,7 @@ function checkIdentityOptions(o: DeweeHandlerOptions, staticAgents: AgentInfo[],
   return agent!;
 }
 
-export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
+export function createDeweeHandler(options: DeweeHandlerOptions): DeweeHandler {
   const o = {
     maxMessageLength: 4000,
     userIdPrefix: "webchat-",
@@ -528,11 +539,13 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       console.warn("[dewee-webchat] identity.authenticate failed:", e);
       return identityFail(req, "SOURCE_UNAVAILABLE", { action: "retry_later", audience: "end_user" });
     }
-    const same =
-      !!user && typeof user.subject === "string" && !!claims.sub && constantTimeEqual(await subjectDigest(secret!, user.subject), claims.sub);
-    if (same) return null;
-    if (ccp) {
-      // The user signed out or switched: the old identity session is revoked at CCP, not only refused here.
+    const current = !!user && typeof user.subject === "string" && user.subject !== "" ? await subjectDigest(secret!, user.subject) : null;
+    if (current && claims.sub && constantTimeEqual(current, claims.sub)) return null;
+    if (ccp && current && claims.sub) {
+      // Another user is signed in on this browser: the previous user's identity session is revoked at
+      // CCP, not only refused here. A request with no user at all (signed out, or a cookie that did
+      // not come along) is only refused: the session may be in use on the user's other devices, and
+      // logout revokes it through `revoke`.
       forgetCachedSession(claims.ids);
       await ccp.revoke(visitorContext(req), claims.v, sealedEdge(claims), claims.ids, claims.ida);
     }
@@ -1166,7 +1179,21 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     }
   }
 
-  return async function deweeHandler(req: Request): Promise<Response> {
+  /** Logout hook (see {@link DeweeHandler.revoke}). */
+  async function revoke(subject: string, request?: Request): Promise<void> {
+    if (!idn || typeof subject !== "string" || subject === "") return;
+    const held: Array<{ agent: string; session: CachedSession }> = [];
+    for (const [k, c] of sessionCache) {
+      const cut = k.indexOf("\n");
+      if (k.slice(cut + 1) === subject) held.push({ agent: k.slice(0, cut), session: c });
+    }
+    for (const { session } of held) forgetCachedSession(session.sessionToken);
+    if (!ccp) return; // the legacy gateway has no revoke call; the forgotten sessions expire on their own
+    const ctx: VisitorContext = request ? visitorContext(request) : { requestId: `dwc-${randomId(12)}` };
+    await Promise.all(held.map(({ agent, session }) => ccp.revoke(ctx, session.visitorId, undefined, session.sessionToken, agent || undefined).catch(() => {})));
+  }
+
+  const deweeHandler = async function deweeHandler(req: Request): Promise<Response> {
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(req) });
     if (!originAllowed(req)) return fail(req, 403, "Origin not allowed", "forbidden_origin");
     const action = new URL(req.url).pathname.replace(/\/+$/, "").split("/").pop();
@@ -1181,6 +1208,7 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
       return fail(req, 500, (e as Error).message || "Internal error", "internal");
     }
   };
+  return Object.assign(deweeHandler, { revoke });
 }
 
 /** Reads options from environment variables (process.env, Workers env, import.meta.env…). */

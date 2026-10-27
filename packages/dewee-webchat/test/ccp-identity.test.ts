@@ -159,6 +159,47 @@ describe("ccp identity: rebinding and logout", () => {
     expect(replay.json().error.code).toBe("LINK_REVOKED");
   });
 
+  it("refuses a request without a login locally and leaves the user's other devices working", async () => {
+    const h = makeHandler({ rebindEachRequest: true });
+    const phone = (await session(h, "user-a")).json();
+    const laptop = (await session(h, "user-a")).json();
+    const signedOut = await chat(h, phone.token);
+    expect(signedOut.status).toBe(401);
+    expect(signedOut.json().error.code).toBe("IDENTITY_REQUIRED");
+    expect(ccp.routes("identity/revoke")).toHaveLength(0);
+    expect((await chat(h, laptop.token, {}, "uid=user-a")).status).toBe(200);
+    expect((await chat(h, phone.token, {}, "uid=user-a")).status).toBe(200);
+  });
+
+  it("revoke(subject) ends the user's identity session at CCP for the logout", async () => {
+    const raw = createDeweeHandler({
+      ccp: { chatUrl: ccp.url, integrationId: INTEGRATION_ID, integrationSecret: INTEGRATION_SECRET },
+      secret: VISITOR_SECRET,
+      rateLimit: false,
+      identity: { sdk: deweeIdentitySdk, authenticate: cookieUser, appId: APP_ID, issuer: ISSUER, assertionSecret: ASSERTION_SECRET },
+    });
+    const h: H = async (req) => {
+      const res = await raw(req);
+      const text = await res.text();
+      return { status: res.status, text, json: () => JSON.parse(text) };
+    };
+    const a = (await session(h, "user-a")).json();
+    const ids = await rawIds(a.token);
+    await raw.revoke("user-a", new Request(`${BASE}/logout`, { headers: { origin: "https://shop.example" } }));
+    expect(ccp.routes("identity/revoke").map((r) => r.body)).toEqual([{ identity_session: ids, agent: "shop" }]);
+    expect((await chat(h, a.token, {}, "uid=user-a")).json().error.code).toBe("LINK_REVOKED");
+    // The next sign-in exchanges a new session instead of reusing the revoked one.
+    const next = (await session(h, "user-a")).json();
+    expect(await rawIds(next.token)).not.toBe(ids);
+    expect(ccp.routes("identity/exchange")).toHaveLength(2);
+    // Unknown or empty subjects are a no-op, and revoke never throws.
+    await raw.revoke("nobody");
+    await raw.revoke("");
+    expect(ccp.routes("identity/revoke")).toHaveLength(1);
+    ccp.state.secrets.clear();
+    await expect(raw.revoke("user-a")).resolves.toBeUndefined();
+  });
+
   it("answers 503 when the login check fails during rebinding", async () => {
     const h = makeHandler({ rebindEachRequest: true });
     const a = (await session(h, "user-a")).json();

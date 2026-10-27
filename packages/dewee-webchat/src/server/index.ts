@@ -2,6 +2,7 @@ export {
   createDeweeHandler,
   optionsFromEnv,
   type AuthenticatedUser,
+  type DeweeHandler,
   type DeweeHandlerOptions,
   type DeweeIdentityOptions,
   type DeweeIdentitySdk,
