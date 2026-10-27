@@ -370,7 +370,8 @@ final class DeweeWebchat
                 default => $this->fail(404, 'Not found', 'not_found'),
             };
         } catch (Throwable $e) {
-            error_log('[dewee-webchat] ' . $e->getMessage());
+            // CCP's own text never reaches the log, only its code.
+            error_log('[dewee-webchat] ' . ($e instanceof DeweeCcpError ? 'CCP error ' . $e->ccpCode : $e->getMessage()));
             if (!headers_sent()) {
                 $this->fail(500, $this->ccp === null && $e->getMessage() !== '' ? $e->getMessage() : 'Internal error', 'internal');
             }
@@ -453,7 +454,8 @@ final class DeweeWebchat
             $this->fail(429, 'Too many sessions, slow down', 'rate_limited');
             return;
         }
-        if (!empty($this->o['turnstile'])) {
+        // Turnstile gates new visitors; a returning visitor refreshes about hourly with a valid token.
+        if ($previous === null && !empty($this->o['turnstile'])) {
             $tt = $body['turnstileToken'] ?? null;
             if (!is_scalar($tt) || (string) $tt === '' || !self::verifyTurnstile((string) $this->o['turnstile']['secretKey'], (string) $tt, $ip)) {
                 $this->fail(403, 'Verification failed', 'turnstile_failed');
@@ -683,6 +685,8 @@ final class DeweeWebchat
             'allowAgentSwitch' => ($this->o['allowAgentSwitch'] ?? null) === false ? false : $cfg['allowAgentSwitch'],
             'allowClientCredentials' => false,
             'turnstileSiteKey' => $this->o['turnstile']['siteKey'] ?? null,
+            // A returning visitor's refresh needs no challenge (see handleCcpSession).
+            'refreshWithoutTurnstile' => !empty($this->o['turnstile']) ? true : null,
             'maxMessageLength' => min((int) $this->o['maxMessageLength'], $cfg['maxMessageChars']),
             'version' => self::VERSION,
         ]));
@@ -1121,7 +1125,8 @@ final class DeweeWebchat
         $ip = $this->clientIp();
         return [
             'visitorOrigin' => $origin === 'null' ? null : $origin,
-            'visitorIp' => $ip === 'unknown' ? null : substr($ip, 0, 64),
+            // CCP's own format for the address; anything else (a forged X-Forwarded-For) is left out.
+            'visitorIp' => preg_match('/^[0-9A-Fa-f:.]{2,64}$/', $ip) === 1 ? $ip : null,
             'requestId' => 'dwc-' . self::randomId(12),
         ];
     }
@@ -1572,7 +1577,8 @@ final class DeweeWebchat
         if ((!is_int($exp) && !is_float($exp)) || $exp < self::nowMs()) {
             return null;
         }
-        if (array_key_exists('ids', $claims) || array_key_exists('ida', $claims)) {
+        // Signed-in tokens and purpose-labelled tokens (a Node backend's reuse hint) are no visitor token here.
+        if (array_key_exists('ids', $claims) || array_key_exists('ida', $claims) || array_key_exists('p', $claims)) {
             return null;
         }
         $out = ['v' => $claims['v'], 'exp' => $exp];

@@ -329,6 +329,21 @@ echo json_encode(['token' => $t, 'fromTs' => DeweeWebchat::verifyVisitorToken($i
     }
   });
 
+  it("challenges new visitors with Turnstile but lets a returning visitor refresh without one", async () => {
+    setOptions({ turnstile: { siteKey: "site-key", secretKey: "turnstile-secret-NEVER-IN-BROWSER" } });
+    expect((await call("/config")).json()).toMatchObject({ turnstileSiteKey: "site-key", refreshWithoutTurnstile: true });
+    const fresh = await call("/session", { method: "POST", body: "{}" });
+    expect([fresh.status, fresh.json().error.code]).toEqual([403, "turnstile_failed"]);
+    const v = "visitor_php_turnst";
+    const token = await signVisitorToken(VISITOR_SECRET, { v, exp: Date.now() + 86_400_000, es: mintEdge(v, -7200), ese: Date.now() - 7_200_000 });
+    expect((await session({ token })).visitorId).toBe(v);
+  });
+
+  it("sends CCP the visitor IP only in CCP's address format", async () => {
+    for (const xff of ["2001:db8::9", "evil<script>"]) await call("/session", { method: "POST", headers: { "x-forwarded-for": xff }, body: "{}" });
+    expect(ccp.routes("session").map((r) => r.headers["x-dewee-visitor-ip"])).toEqual(["2001:db8::9", undefined]);
+  });
+
   it("leaves the legacy gateway transport's /session unchanged", async () => {
     setOptions({ ccp: undefined, gatewayUrl: "https://gw.example", token: "gw-token", agents: ["shop"] });
     const s = await session();

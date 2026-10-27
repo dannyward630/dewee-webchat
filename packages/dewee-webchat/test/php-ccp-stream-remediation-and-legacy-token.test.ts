@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { signVisitorToken } from "../src/server";
+import { signReuseHint } from "../src/server/security";
 
 const PHP = process.env.PHP_BIN || "php";
 const hasPhp = spawnSync(PHP, ["-v"]).status === 0;
@@ -88,6 +89,7 @@ describe.skipIf(!hasPhp)("PHP legacy visitor token", () => {
     const withEdge = await signVisitorToken(VISITOR_SECRET, { v: "visitor_legacy_02", exp, es: "dws1.edge.token", ese: 1234 });
     const signedIn = await signVisitorToken(VISITOR_SECRET, { v: "visitor_legacy_03", exp, ids: "idsess_1", ida: "shop", sub: "digest" });
     const expired = await signVisitorToken(VISITOR_SECRET, { v: "visitor_legacy_04", exp: Date.now() - 1000 });
+    const hint = await signReuseHint(VISITOR_SECRET, { v: "visitor_legacy_06", exp, ids: "idsess_2", ida: "shop", sub: "digest" });
     const out = php(
       `$s = $in['secret'];
 echo json_encode([
@@ -96,10 +98,11 @@ echo json_encode([
   'withEdge' => DeweeWebchat::verifyVisitorToken($s, $in['withEdge']),
   'signedIn' => DeweeWebchat::verifyVisitorToken($s, $in['signedIn']),
   'expired' => DeweeWebchat::verifyVisitorToken($s, $in['expired']),
+  'hint' => DeweeWebchat::verifyVisitorToken($s, $in['hint']),
   'tampered' => DeweeWebchat::verifyVisitorToken($s, substr($in['legacy'], 0, -2) . 'xx'),
   'otherSecret' => DeweeWebchat::verifyVisitorToken(str_repeat('o', 40), $in['legacy']),
 ]);`,
-      { secret: VISITOR_SECRET, legacy, withEdge, signedIn, expired, exp },
+      { secret: VISITOR_SECRET, legacy, withEdge, signedIn, expired, hint, exp },
     );
     // Exactly the two claims, nothing added.
     expect(out.legacy).toEqual({ v: "visitor_legacy_01", exp });
@@ -108,6 +111,8 @@ echo json_encode([
     // The PHP backend has no signed-in mode: such a token is refused rather than read as an anonymous visitor.
     expect(out.signedIn).toBeNull();
     expect(out.expired).toBeNull();
+    // A Node backend's reuse hint is never a visitor token.
+    expect(out.hint).toBeNull();
     expect(out.tampered).toBeNull();
     expect(out.otherSecret).toBeNull();
   });
