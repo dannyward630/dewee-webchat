@@ -5,6 +5,7 @@ import {
   HEADER_GATEWAY_TOKEN,
   HEADER_GATEWAY_URL,
   VERSION,
+  isAdmissionErrorCode,
   isIdentityErrorCode,
   type AgentInfo,
   type ChatStreamEvent,
@@ -27,6 +28,7 @@ import {
   type GatewayActor,
   type GatewayCredentials,
 } from "./gateway-client";
+import { admissionErrorEvent, admissionErrorResponse } from "./admission-errors";
 import {
   deriveVisitorId,
   memoryRateLimiter,
@@ -159,7 +161,8 @@ export interface DeweeHandlerOptions {
   /**
    * Custom limiter, or false to disable. Default (in memory): 20 messages/min per visitor and IP,
    * 10 new sessions/10 min per IP and, with `identity`, 120 `authenticate` calls/min per IP,
-   * 30 signed-in sessions/10 min per user and 5 link starts/10 min per user.
+   * 30 signed-in sessions/10 min per user and 5 link starts/10 min per user. Defense in depth: the
+   * Dewee gateway owns the shared message limit and refuses with `RATE_LIMITED` (forwarded typed).
    */
   rateLimit?: RateLimiter | false;
   maxMessageLength?: number;
@@ -314,10 +317,10 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
     return o.allowedOrigins === "*" || (o.allowedOrigins ?? []).includes(origin);
   }
 
-  const json = (req: Request, body: unknown, status = 200) =>
+  const json = (req: Request, body: unknown, status = 200, extraHeaders: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), {
       status,
-      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...corsHeaders(req) },
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...extraHeaders, ...corsHeaders(req) },
     });
   const fail = (req: Request, status: number, message: string, code = "bad_request") => json(req, { error: { message, code } }, status);
 
@@ -330,10 +333,15 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
   const misconfigured = (req: Request) => fail(req, 500, "Signed-in chat is misconfigured on this server", "identity_misconfigured");
 
   /**
-   * Gateway WebSocket failure: identity codes are forwarded typed, anything else stays a gateway error.
+   * Gateway WebSocket failure: admission and identity codes are forwarded typed, anything else stays a
+   * gateway error.
    * A dead identity session is dropped from the reuse cache.
    */
   const gatewayFail = (req: Request, e: unknown, sessionToken?: string) => {
+    if (e instanceof GatewayError && isAdmissionErrorCode(e.code)) {
+      const r = admissionErrorResponse(e.code, e.retryAfterMs);
+      return json(req, r.body, r.status, r.headers);
+    }
     if (!(e instanceof GatewayError && isIdentityErrorCode(e.code))) return fail(req, 502, (e as Error).message, "gateway_error");
     if (sessionToken && DEAD_SESSION_CODES.has(e.code)) forgetCachedSession(sessionToken);
     if (e.remediation?.audience === "operator") console.error(`[dewee-webchat] identity: ${e.message} (${e.code})`);
@@ -685,8 +693,10 @@ export function createDeweeHandler(options: DeweeHandlerOptions): Handler {
           if (abort.signal.aborted) break;
         }
       } catch (e) {
-        errMsg = (e as Error).message;
-        await send({ type: "error", message: errMsg, code: "gateway_error" });
+        // A refused connect (anonymous visitors connect inside streamChat) is still an admission refusal.
+        const admission = e instanceof GatewayError && isAdmissionErrorCode(e.code) ? admissionErrorEvent(e.code, e.retryAfterMs) : null;
+        errMsg = admission ? admission.message : (e as Error).message;
+        await send(admission ?? { type: "error", message: errMsg, code: "gateway_error" });
       } finally {
         connection?.close(); // idempotent; covers a turn that ended before the stream took the connection
         clearInterval(keepAlive);

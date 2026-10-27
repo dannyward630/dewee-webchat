@@ -212,6 +212,10 @@ details > summary svg.ic { width: 14px; height: 14px; flex: none; }
 .action[data-status="awaiting-confirmation"] .action-state { color: #b06f00; }
 .action[data-status="denied"] .action-state, .action[data-status="error"] .action-state { color: #c2334f; }
 .notice { margin: -6px 0 16px; font-size: 12px; color: var(--dw-muted); text-align: center; }
+.msg.user.refused { flex-direction: column; align-items: flex-end; }
+.refusal { margin-top: 6px; max-width: 86%; font-size: 12.5px; line-height: 1.45; color: #c2334f; text-align: right; }
+.cooldown { margin: 0 2px 8px; font-size: 12px; color: var(--dw-muted); }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .confirm-backdrop {
   position: absolute; inset: 0; z-index: 2; display: flex; align-items: flex-end; justify-content: center; padding: 12px;
   background: color-mix(in srgb, var(--dw-fg) 28%, transparent); animation: rise .18s ease both;

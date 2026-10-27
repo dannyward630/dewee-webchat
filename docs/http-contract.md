@@ -54,7 +54,30 @@ Each SSE frame is `data: <json>\n\n`; `: ping` comments keep the connection aliv
 | `tool_call`   | `id`, `name`, `arguments`                |
 | `tool_result` | `id`, `name`, `isError`, `result`        |
 | `done`        | `content` (full answer), `usage?`        |
-| `error`       | `message`, `code?`                       |
+| `error`       | `message`, `code?`, `remediation?`, `retryAfterMs?` |
+
+Every run ends with `done` or `error`, after which the server closes the stream.
+
+### Admission errors
+
+The gateway checks every message against its admission policy before the run starts. A refusal ends
+the stream with a typed `error` event. Its `message` is a fixed English fallback: the gateway's own text
+(which may name tenant or admin details) is never forwarded, and the widget shows its own localized copy.
+
+| `code` | Fields | Meaning | Widget |
+|---|---|---|---|
+| `POLICY_DENIED` | | The message is outside the policy (for example too long). Not retryable as is. | Shown next to the refused message; the text goes back to the composer |
+| `RATE_LIMITED` | `retryAfterMs` | Rate limit, a run still answering the previous message, or the gateway's counter backend unavailable | Send disabled until `retryAfterMs` elapses, announced with `aria-live`; the text goes back to the composer |
+| `CHALLENGE_REQUIRED` | | Reserved for the gateway challenge protocol. No challenge context is defined or forwarded yet | Generic localized error, no challenge UI |
+
+`retryAfterMs` is a positive integer: the gateway's value rounded up, 5000 when missing or invalid, at
+most 600000. When the gateway refuses before streaming starts (a signed-in user's connection), the same
+codes are JSON errors: `403 POLICY_DENIED`, `429 RATE_LIMITED` with `error.retryAfterMs` and a
+`Retry-After` header in seconds, `403 CHALLENGE_REQUIRED`.
+
+The gateway owns the shared message limit across every backend replica. The backend's own limiter (in
+memory by default, 20 messages per minute) is defense in depth: it answers `429 rate_limited` without
+`retryAfterMs` before the gateway is reached.
 
 ## Page actions
 
@@ -172,7 +195,8 @@ user's cookie is then useless.
 **Rate limits** (the Node/Workers defaults): host login checks 120 per IP per minute (before the check
 runs, on `/session` and on rebinding), signed-in `/session` 30 per user per 10 minutes, `/link` 5 per
 user per 10 minutes, new anonymous sessions 10 per IP per 10 minutes, messages 20 per minute. Every
-limit answers `429 rate_limited`. The host's login check runs on every `/session` (every page load) and,
+limit answers `429 rate_limited` (the gateway's own message limit is `RATE_LIMITED`, see
+[admission errors](#admission-errors)). The host's login check runs on every `/session` (every page load) and,
 with rebinding, on every `/chat`, `/history` and `/link`, so it should be cheap or cached. The IP
 comes from `cf-connecting-ip`, `x-real-ip` or `x-forwarded-for`, which only a proxy in front can vouch
 for (unchanged from before signed-in users).
@@ -268,6 +292,8 @@ The backend opens a WebSocket to `{gateway}/ws` (protocol v3):
    `tool.result {id,name,is_error,result}`, `run.completed {content}`, `run.failed {error}`.
    Only events whose `sessionKey` (or `visibleSessionKey`/`runSessionKey`) matches are forwarded.
 4. The `chat.send` response `{"type":"res","id":"2","ok":true,"payload":{"content":…,"usage":…}}` ends the run.
+   A refused message answers `{"type":"res","id":"2","ok":false,"error":{"code":"RATE_LIMITED","retryable":true,"retryAfterMs":…,"message":…}}`
+   (or `POLICY_DENIED`), mapped to an [admission error](#admission-errors).
 
 `sessionKey` = `agent:{agent}:ws:direct:webchat-{visitorId}-{conversationId}`.
 History uses `chat.history {agentId, sessionKey}` on the same connection type.
